@@ -4,6 +4,23 @@ export interface Project {id:string;name:string;description:string;createdAt:num
 export interface MaterialPage {page:number;text:string;warning?:string}
 export interface MaterialTerm {term:string;page:number;quote:string}
 export interface Material {id:string;projectId:string;name:string;createdAt:number;pages:MaterialPage[];summary:string;terms?:MaterialTerm[];status:'ready'|'partial'|'error';warning?:string}
+export const PREPARATION_OVERVIEW=['company','product','customers','problem','technicalApproach','businessModel','keyMetrics','financing'] as const;
+export const PREPARATION_HYPOTHESES=['businessModel','growth','unitEconomics','moat'] as const;
+export interface PreparationSource {materialId:string;page:number;quote:string}
+export interface PreparationClaim {statement:string;source:PreparationSource}
+export interface PreparationHypothesis {assumption:string;gap:string;source:PreparationSource}
+export interface PreparationQuestion {text:string;why:string;evidenceWanted:string;source:PreparationSource}
+export interface PreparationDraft {
+ overview:Partial<Record<typeof PREPARATION_OVERVIEW[number],PreparationClaim>>;
+ hypotheses:Partial<Record<typeof PREPARATION_HYPOTHESES[number],PreparationHypothesis>>;
+ questions:PreparationQuestion[];
+}
+export interface ProjectPreparation extends PreparationDraft {
+ generatedAt:number;
+ inspectedPages:number;
+ totalPages:number;
+ excerpted:boolean;
+}
 export interface Meeting {id:string;projectId:string;title:string;mode:'online'|'offline';demo:boolean;status:'ready'|'live'|'paused'|'ended';createdAt:number;startedAt?:number;endedAt?:number;ownerId:string;retainAudio:boolean;finishingCapture?:true}
 export interface Segment {id:string;text:string;speaker:string;startMs:number;endMs:number;final:boolean;receivedAt:number;latencyMs?:number;source:'asr'|'manual'|'demo';gap?:boolean}
 export interface Evidence {id:string;title:string;url:string;snippet:string;retrievedAt:number;query:string}

@@ -13,13 +13,14 @@ function decode(){while(recognizer.isReady(stream))recognizer.decode(stream);}
 try{
  const {OnlineRecognizer}=require('sherpa-onnx-node');
  const hotwordsBuf=(workerData.hotwords||[]).join('\n');
+ const {modelDir,files,modelType,modelingUnit}=workerData;
  const modelConfig={
-  transducer:{encoder:join(workerData.modelDir,'encoder-epoch-99-avg-1.int8.onnx'),decoder:join(workerData.modelDir,'decoder-epoch-99-avg-1.onnx'),joiner:join(workerData.modelDir,'joiner-epoch-99-avg-1.int8.onnx')},
-  tokens:join(workerData.modelDir,'tokens.txt'),numThreads:workerData.numThreads||2,provider:'cpu',modelType:'zipformer',debug:0,
+  transducer:{encoder:join(modelDir,files.encoder),decoder:join(modelDir,files.decoder),joiner:join(modelDir,files.joiner)},
+  tokens:join(modelDir,files.tokens),numThreads:workerData.numThreads||2,provider:'cpu',modelType,debug:0,
  };
  if(hotwordsBuf){
-  modelConfig.modelingUnit='cjkchar+bpe';
-  modelConfig.bpeVocab=join(workerData.modelDir,'bpe.vocab');
+  modelConfig.modelingUnit=modelingUnit;
+  modelConfig.bpeVocab=join(modelDir,'bpe.vocab');
  }
  recognizer=new OnlineRecognizer({
   featConfig:{sampleRate:16000,featureDim:80},modelConfig,

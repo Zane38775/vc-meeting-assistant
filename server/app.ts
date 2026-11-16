@@ -13,8 +13,9 @@ import {MAX_MATERIAL_TEXT} from './materials';
 import {validatedMaterialTerms} from '../shared/material-references';
 import {MATERIAL_FILE_LIMIT_MESSAGE,MAX_MATERIAL_FILE_BYTES} from '../shared/material-limits';
 import {validateTranscriptionTerms} from './providers/transcription-terms';
+import {currentPreparation,hasPreparationItems,preparationSourceDigest,projectPreparationInput,type StoredPreparation} from './project-preparation';
 import type {ProviderAPI} from './providers/contracts';
-import type {User,Project,Meeting,Material,Question,Comment,Segment,Summary,Role} from '../shared/types';
+import type {User,Project,Meeting,Material,Question,Comment,Segment,Summary,Role,PreparationDraft} from '../shared/types';
 export interface AppOptions {dbPath?:string;dataDir?:string;providers?:ProviderAPI;clientDir?:string;configPath?:string}
 const text=(v:unknown,max=5000)=>typeof v==='string'?v.trim().slice(0,max):'';
 export async function createApp(options:AppOptions={}) {
@@ -82,7 +83,14 @@ export async function createApp(options:AppOptions={}) {
  app.post('/api/auth/logout',async(req,reply)=>{const u=store.fromSession(req.cookies.vc_session);store.logout(req.cookies.vc_session);if(u)for(const p of hub.peers)if(p.user.id===u.id)p.socket.close(4001,'已退出登录');reply.clearCookie('vc_session',{path:'/'});return {ok:true}});
  app.get('/api/projects',async req=>{const u=logged(req);return {projects:store.list<Project>('project').filter(p=>store.role(p.id,u.id)).map(p=>({...p,role:store.role(p.id,u.id)}))}});
  app.post('/api/projects',async req=>{const u=logged(req),b=body(req);if(!text(b.name,100))failure('请输入项目名称');const project:Project={id:id(),name:text(b.name,100),description:text(b.description,1000),createdAt:Date.now(),role:'admin'};store.put('project',project.id,project.id,project);store.put('member',`${project.id}:${u.id}`,project.id,{userId:u.id,role:'admin'});return {project}});
- app.get('/api/projects/:pid',async(req:any)=>{const u=logged(req),pid=req.params.pid;const role=store.requireRole(pid,u.id);const project=store.get<Project>('project',pid);if(!project)failure('项目不存在',404);const members=store.list<any>('member',pid).map(m=>({...store.user(m.userId),role:m.role}));return {project:{...project,role},materials:store.list('material',pid),meetings:store.list('meeting',pid),members}});
+ app.get('/api/projects/:pid',async(req:any)=>{
+  const u=logged(req),pid=req.params.pid,role=store.requireRole(pid,u.id);
+  const project=store.get<Project>('project',pid);
+  if(!project)failure('项目不存在',404);
+  const materials=store.list<Material>('material',pid);
+  const members=store.list<any>('member',pid).map(m=>({...store.user(m.userId),role:m.role}));
+  return {project:{...project,role},materials,meetings:store.list('meeting',pid),members,...currentPreparation(store,pid,materials)};
+ });
  app.delete('/api/projects/:pid',async(req:any)=>{
   const u=logged(req),pid=req.params.pid;if(store.requireRole(pid,u.id)!=='admin')failure('仅管理员可以删除项目',403);
   const meetings=store.list<Meeting>('meeting',pid),materials=store.list<Material>('material',pid);
@@ -97,6 +105,37 @@ export async function createApp(options:AppOptions={}) {
  app.post('/api/projects/:pid/invites',async(req:any)=>{const u=logged(req),pid=req.params.pid;if(store.requireRole(pid,u.id)!=='admin')failure('仅管理员可以邀请成员',403);const b=body(req);const role:Role=b.role==='editor'?'editor':'viewer';const token=randomBytes(24).toString('base64url'),expiresAt=Date.now()+86400000;store.put('invite',hash(token),pid,{projectId:pid,role,expiresAt});return {token,expiresAt}});
  app.post('/api/invites/accept',async req=>{const u=logged(req),token=text(body(req).token,200),key=hash(token);const inv=store.get<any>('invite',key);if(!inv||inv.expiresAt<Date.now())failure('邀请已失效或已使用');if(!store.get('project',inv.projectId))failure('项目不存在',404);if(!store.role(inv.projectId,u.id))store.put('member',`${inv.projectId}:${u.id}`,inv.projectId,{userId:u.id,role:inv.role});store.delete('invite',key);return {projectId:inv.projectId}});
  app.delete('/api/projects/:pid/members/:uid',async(req:any)=>{const u=logged(req),{pid,uid}=req.params;if(store.requireRole(pid,u.id)!=='admin'||uid===u.id)failure('不能移除该成员',403);store.delete('member',`${pid}:${uid}`);hub.revoke(pid,uid);return {ok:true}});
+ async function updateProjectPreparation(pid:string,uid:string){
+  const project=store.get<Project>('project',pid);
+  if(!project)failure('项目不存在',404);
+  store.requireRole(pid,uid,true);
+  if(!providers.getCapabilities().deepseek||!providers.prepareProject)failure('请先配置 DeepSeek，再生成会前研判');
+  const materials=store.list<Material>('material',pid);
+  const input=projectPreparationInput(project.name,materials);
+  if(!input.materials.length)failure('请先上传含可提取文字的项目资料');
+  const sourceDigest=preparationSourceDigest(materials);
+  const prior=store.get<StoredPreparation>('projectPreparation',pid);
+  let draft:PreparationDraft|undefined;
+  try{draft=await providers.prepareProject(input,AbortSignal.timeout(30000));}catch{/* Preserve any previously saved preparation. */}
+  if(!store.get('project',pid))failure('项目不存在',404);
+  store.requireRole(pid,uid,true);
+  if(preparationSourceDigest(store.list<Material>('material',pid))!==sourceDigest||
+   store.get<StoredPreparation>('projectPreparation',pid)?.revision!==prior?.revision){
+   failure('研判生成期间资料或研判已更新，请查看当前版本后重试',409);
+  }
+  if(!draft)failure('会前研判未完成，请检查 DeepSeek 服务后重试',424);
+  if(prior?.sourceDigest===sourceDigest&&hasPreparationItems(prior.preparation)&&!hasPreparationItems(draft)){
+   failure('本次没有可核实的研判内容，已保留当前版本',424);
+  }
+  const inspectedPages=input.materials.reduce((count,material)=>count+material.pages.length,0);
+  const preparation={...draft,generatedAt:Date.now(),inspectedPages,totalPages:input.totalPages,excerpted:input.excerpted};
+  store.put('projectPreparation',pid,pid,{revision:id(),sourceDigest,preparation});
+  return preparation;
+ }
+ app.post('/api/projects/:pid/preparation',async(req:any)=>{
+  const u=logged(req);
+  return {preparation:await updateProjectPreparation(req.params.pid,u.id)};
+ });
  const materialAnalysisWarning='AI 摘要未完成，可稍后重试或手动编辑';
  async function analyzeSavedMaterial(original:Material,uid:string,upload:boolean){
   const originalPages=JSON.stringify(original.pages);
@@ -147,7 +186,12 @@ export async function createApp(options:AppOptions={}) {
    store.requireRole(pid,u.id,true);
    store.put('material',material.id,pid,material);
   }catch(error){await unlink(filePath).catch(()=>{});throw error;}
-  return {material:providers.getCapabilities().deepseek?await analyzeSavedMaterial(material,u.id,true):material};
+  if(!providers.getCapabilities().deepseek)return {material};
+  const preparation=providers.prepareProject&&material.pages.some(page=>page.text.trim())
+   ?updateProjectPreparation(pid,u.id).then(()=>undefined,()=> '会前研判未完成，可在项目页重试。')
+   :undefined;
+  const [updated,preparationWarning]=await Promise.all([analyzeSavedMaterial(material,u.id,true),preparation]);
+  return {material:updated,...(preparationWarning?{preparationWarning}:{})};
  });
  app.post('/api/materials/:id/analysis',async(req:any)=>{
   const u=logged(req),material=store.get<Material>('material',req.params.id);

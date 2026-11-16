@@ -1,9 +1,10 @@
 import {appendFileSync,mkdirSync} from 'node:fs';
 import {join} from 'node:path';
 import type WebSocket from 'ws';
-import {Store,id,failure} from './store';
+import {Store,id,failure,hash} from './store';
 import type {Evidence,Material,Meeting,Segment,Question,ResearchBrief,ResearchFinding,LiveCommand,User,LiveEvent} from '../shared/types';
 import {validatedMaterialTerms} from '../shared/material-references';
+import {currentPreparation} from './project-preparation';
 import type {ProviderAPI,ASRSession,AnalysisInput,QuestionDraft} from './providers/contracts';
 type Peer={socket:WebSocket;user:User;mid:string};
 type ResearchAttempt={questionIds:Set<string>;active:boolean;retryAt:number};
@@ -13,6 +14,9 @@ const RESEARCH_RETRY_INTERVAL_MS=30_000;
 const MIN_FRESH_TEXT=80;
 const normalized=(text:string)=>text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
 const hasEnoughFreshText=(r:Runtime)=>[...r.pendingSegments.values()].reduce((sum,length)=>sum+length,0)>=MIN_FRESH_TEXT;
+function coachingProjectDigest({materials,preparation}:Pick<AnalysisInput,'materials'|'preparation'>):string {
+ return hash(JSON.stringify([materials.map(({id,name,pages,summary})=>[id,name,pages,summary]),preparation]));
+}
 
 function repeatedQuestion(existing:Question,draft:QuestionDraft):boolean {
  if(normalized(existing.text)===normalized(draft.text))return true;
@@ -157,7 +161,15 @@ export class LiveHub {
   this.schedule(mid,r);
  }
  startDemo(m:Meeting){const r=this.runtime(m.id);if(r.demoTimer)clearInterval(r.demoTimer);let part=0;const tick=()=>{if(!this.alive(m.id,r)){clearInterval(r.demoTimer);return;}const idx=r.demoIndex% demoLines.length;const [speaker,text]=demoLines[idx];part++;const startMs=r.demoIndex*4500;const receivedAt=Date.now();const segment:Segment={id:`demo-${r.demoIndex}`,speaker,text:text.slice(0,Math.min(text.length,part*9)),startMs,endMs:startMs+4000,receivedAt,final:part*9>=text.length,source:'demo',latencyMs:0};if(segment.final){this.store.finalSegment(m.id,segment);if(idx===0||idx===4){const q:Question={id:`demo-q-${idx}`,text:idx===0?'95% 的测试集如何划分？是否有跨客户的独立验证？':'100 毫秒包含采集、预处理和网络耗时吗？',reason:idx===0?'区分历史测试指标与真实环境表现。':'确认性能指标的测量边界与硬件条件。',quote:text,segmentIds:[segment.id],status:'new',evidenceIds:[],createdAt:Date.now(),kind:'inference',latencyMs:0};if(!this.store.get('question',`${m.id}:${q.id}`))this.store.put('question',`${m.id}:${q.id}`,m.id,q);}r.demoIndex++;part=0;this.broadcast(m.id);this.status(m.id,'coach','演示追问 · 预设内容，不是模型实测');if(r.demoIndex>=demoLines.length){clearInterval(r.demoTimer);r.demoTimer=undefined;this.status(m.id,'asr','演示段落播放完毕，可继续手动补充或结束会议');}}else for(const p of this.peers)if(p.mid===m.id)this.send(p.socket,{type:'transcript.partial',data:segment});};r.demoTimer=setInterval(tick,500);tick();this.status(m.id,'asr','演示播放中 · 未使用麦克风或真实 API');}
- input(mid:string):AnalysisInput {const m=this.store.get<Meeting>('meeting',mid)!;return {projectName:this.store.get<any>('project',m.projectId)?.name||'',segments:this.store.list<Segment>('segment',mid).filter(s=>!s.gap),questions:this.store.list<Question>('question',mid),materials:this.store.list('material',m.projectId),researchBriefs:this.store.list<ResearchBrief>('researchBrief',mid),evidence:this.store.list<Evidence>('evidence',mid)};}
+ private projectAnalysisContext(projectId:string):Pick<AnalysisInput,'materials'|'preparation'> {
+  const materials=this.store.list<Material>('material',projectId);
+  const {preparation}=currentPreparation(this.store,projectId,materials);
+  return {materials,...(preparation?{preparation}:{})};
+ }
+ input(mid:string):AnalysisInput {
+  const m=this.store.get<Meeting>('meeting',mid)!;
+  return {projectName:this.store.get<any>('project',m.projectId)?.name||'',segments:this.store.list<Segment>('segment',mid).filter(s=>!s.gap),questions:this.store.list<Question>('question',mid),researchBriefs:this.store.list<ResearchBrief>('researchBrief',mid),evidence:this.store.list<Evidence>('evidence',mid),...this.projectAnalysisContext(m.projectId)};
+ }
  private schedule(mid:string,r:Runtime,flush=false){
   if(!r.pendingSegments.size){r.flushAnalysis=false;return;}
   if(flush){
@@ -195,11 +207,18 @@ export class LiveHub {
   const timer=setTimeout(()=>controller.abort(),15000);
   this.status(mid,'coach','正在梳理新增发言');
   try{
-   const {questions:[draft]}=await this.providers.analyzeContext({...this.input(mid),newSegmentIds},controller.signal);
+   const input=this.input(mid);
+   const sourceDigest=coachingProjectDigest(input);
+   const {questions:[draft]}=await this.providers.analyzeContext({...input,newSegmentIds},controller.signal);
    if(controller.signal.aborted||!this.alive(mid,r))return;
    const existing=this.store.list<Question>('question',mid);
    if(!draft||existing.some(question=>repeatedQuestion(question,draft))){
     this.status(mid,'coach','已梳理，暂无值得打断的追问',Date.now()-started);
+    return;
+   }
+   const {projectId}=this.store.get<Meeting>('meeting',mid)!;
+   if(coachingProjectDigest(this.projectAnalysisContext(projectId))!==sourceDigest){
+    this.status(mid,'coach','项目资料或会前研判已更新，将结合后续发言重新分析',Date.now()-started);
     return;
    }
    const q:Question={...draft,id:id(),status:'new',createdAt:Date.now(),kind:'inference',evidenceIds:[],latencyMs:Date.now()-started};

@@ -2,10 +2,12 @@
 
 ## 版本与当前证据
 
-默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.1-beta.1` 是尚未发布的本地候选版。
+默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.2-beta.1` 是尚未发布的本地候选版。
 
-- 本轮本机 `RUN_LOCAL_ASR_REALTIME=1 npm test` 在 Apple Silicon 和 Node 24 上运行 98 项，全部通过且零跳过，包含真实模型实时节奏检查。
-- PR #1 的远端分支 `codex/mac-device-validation` 指向 `3d6af1d2547f9da618ce1b41e4266cf1f647a6b5`。该提交的 Windows 与 macOS CI 均通过，Mac 构建、归档检查及开发产物上传已完成。[PR #1](https://github.com/Zane38775/vc-meeting-assistant/pull/1) · [CI 运行](https://github.com/Zane38775/vc-meeting-assistant/actions/runs/43901975366)
+本轮 X-ASR 接入、会前研判、108 项测试、真实 DeepSeek 检查和本机文件读取问题详见 [2026-11-17 开发进度](docs/DEVELOPMENT-PROGRESS-2026-11-17.md)。下面保留之前版本的实测证据，版本和测量窗口不能混用。
+
+- 0.1.1 候选版的本机 `RUN_LOCAL_ASR_REALTIME=1 npm test` 在 Apple Silicon 和 Node 24 上运行 98 项，全部通过且零跳过，包含真实模型实时节奏检查。
+- PR #1 的先前代码提交为 `3d6af1d2547f9da618ce1b41e4266cf1f647a6b5`。该提交的 Windows 与 macOS CI 均通过，Mac 构建、归档检查及开发产物上传已完成。[PR #1](https://github.com/Zane38775/vc-meeting-assistant/pull/1) · [CI 运行](https://github.com/Zane38775/vc-meeting-assistant/actions/runs/43901975366)
 - Mac 本地模型以公开 WAV 按 200 ms 送入。两个样例从音频开始到首条暂定结果分别约 1.22 秒和 1.42 秒，最后一帧到定稿分别约 65 ms 和 27 ms。自然停顿分句及后续发言通过。此为单次短样例测量，真人准确率、设备录音与长会性能单独验收。
 - 术语回归覆盖页码、原文引文、页内词边界、材料修改后的重验和项目隔离。术语进入本地模型解码。候选包的真人中英混语复验仍有误识，见下文。
 - 追问回归覆盖 80 个新增有效字符门槛、实时轮次至少间隔 30 秒、尾句确认后的补分析、每轮至多一问或零问，以及同证据改写的抑制。中文资料整理回归检查搜索原文引文和来源关联，整理范围限于搜索摘要，保留原来源和失败状态。
@@ -37,7 +39,7 @@
 - 候选安装版的 HTTP API 用 1,113 ms 上传并解析合成 PDF，返回 HTTP 200 和 1 页，原件下载逐字节一致。实际 PDF 界面操作待复验。
 - 候选安装版的真人指定语句中，`home party` 识别为「红 PARTY」，`ACE-Step` 识别为「A STEP」。定稿保存到「推理成本」，最后一句缺失。该会话未保留原始 PCM，缺失原因待确认。该轮 DeepSeek 追问分析耗时 773 ms，输出 0 问。[Mac 用户设备验收](docs/MAC-DEVICE-VALIDATION-2026-11-16.md)
 
-使用者已要求更换识别质量更好的模型。正在比较 X-ASR、Whisper 和 Fun-ASR，当前候选包仍使用本地 Zipformer。
+根据使用者反馈，已比较 X-ASR、Whisper 和 Fun-ASR，并将 X-ASR 接入 0.1.2 候选源码。以上真人试验属于 0.1.1 / 旧 Zipformer，新模型真人复验待使用者方便时进行。
 
 ## 仍待实机验证
 

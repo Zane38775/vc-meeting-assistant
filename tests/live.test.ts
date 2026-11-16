@@ -9,8 +9,9 @@ import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 import {Store} from '../server/store';
 import {LiveHub} from '../server/live';
+import {preparationSourceDigest,type StoredPreparation} from '../server/project-preparation';
 import type {AnalysisInput,ASRCallbacks,ProviderAPI} from '../server/providers/contracts';
-import type {Meeting,Segment} from '../shared/types';
+import type {Material,Meeting,Segment} from '../shared/types';
 
 class Socket extends EventEmitter {
   readyState=1; bufferedAmount=0; messages:any[]=[];
@@ -383,6 +384,72 @@ test('live analysis accumulates unique final text and spaces rounds 30 seconds a
   await settleMessages();
   assert.deepEqual(calls.map(input=>input.newSegmentIds),[['a','b'],['c']]);
   assert.ok(f.socket.messages.some(m=>m.stage==='coach'&&m.message==='已梳理，暂无值得打断的追问'));
+});
+
+for(const change of ['material','preparation','comment'] as const)test(`coaching checks source changes while a draft is pending: ${change}`,async t=>{
+  const f=fixture(t);
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+  f.providers.getCapabilities=()=>({asr:true,deepseek:true,model:'test',version:'test'});
+  const material:Material={id:'bp',projectId:'project',name:'BP.txt',createdAt:1,status:'ready',summary:'公司正在试点。',pages:[{page:1,text:'公司有三个试点客户。'}]};
+  f.store.put('material',material.id,'project',material);
+  const preparationQuestion={
+    text:'试点客户有何共同条件？',why:'判断试点结果是否可推广。',evidenceWanted:'客户行业与部署方式。',
+    source:{materialId:material.id,page:1,quote:'公司有三个试点客户。'},
+  };
+  const originalPreparation:StoredPreparation={
+    revision:'original',sourceDigest:preparationSourceDigest([material]),
+    preparation:{generatedAt:1,inspectedPages:1,totalPages:1,excerpted:false,overview:{},hypotheses:{},questions:[preparationQuestion]},
+  };
+  f.store.put('projectPreparation','project','project',originalPreparation);
+  let release!:()=>void;
+  const firstRound=new Promise<void>(resolve=>{release=resolve;});
+  const calls:AnalysisInput[]=[];
+  f.providers.analyzeContext=async input=>{
+    calls.push(input);
+    const first=input.newSegmentIds?.includes('pilot');
+    if(first)await firstRound;
+    return {questions:[{
+      text:first?'有多少试点已经付费？':'单次交付需要多少工时？',
+      reason:'核对项目经济性。',quote:input.materials[0].pages[0].text,
+      materialId:material.id,materialPage:1,segmentIds:input.newSegmentIds!,
+      focus:first?'customer_evidence':'unit_economics',researchQuery:first?'RAG benchmark':'ASR accuracy',
+    }]};
+  };
+  const searches:string[]=[];
+  f.providers.researchTopic=async query=>{
+    searches.push(query);
+    return [{id:query,title:'Reference',url:'https://example.test/research',snippet:'Public research.',retrievedAt:1,query}];
+  };
+  await f.command('start');
+  const {onSegment}=f.sessions[0].callbacks;
+  onSegment({...segment('pilot'),text:'讨论客户试点的情况。'.repeat(12)});
+  t.mock.timers.tick(0);
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].preparation,originalPreparation.preparation);
+  if(change==='material'){
+    f.store.put('material',material.id,'project',{...material,pages:[{page:1,text:'经核实只有一家试点客户。'}]});
+  }else if(change==='preparation'){
+    f.store.put('projectPreparation','project','project',{
+      ...originalPreparation,revision:'updated',
+      preparation:{...originalPreparation.preparation,questions:[{...preparationQuestion,text:'如何区分试点和有效部署？'}]},
+    });
+  }else{
+    f.store.put('comment','meeting:comment','meeting',{id:'comment',userId:'user',userName:'Host',text:'会上记录',private:false,createdAt:2});
+  }
+  release();
+  await settleMessages();
+  const unaffected=change==='comment';
+  assert.deepEqual(f.store.snapshot('meeting','user').questions.map(q=>q.text),unaffected?['有多少试点已经付费？']:[]);
+  assert.deepEqual(searches,unaffected?['RAG benchmark']:[]);
+  onSegment({...segment('delivery'),text:'讨论客户部署和交付工时。'.repeat(12)});
+  t.mock.timers.tick(30_000);
+  await settleMessages();
+  assert.deepEqual(calls.map(input=>input.newSegmentIds),[['pilot'],['delivery']]);
+  if(change==='material')assert.equal(calls[1].preparation,undefined);
+  if(change==='preparation')assert.equal(calls[1].preparation?.questions[0].text,'如何区分试点和有效部署？');
+  const published=f.store.snapshot('meeting','user');
+  assert.deepEqual(published.questions.map(q=>q.text),unaffected?['有多少试点已经付费？','单次交付需要多少工时？']:['单次交付需要多少工时？']);
+  assert.deepEqual(published.evidence.map(e=>e.query),unaffected?['RAG benchmark','ASR accuracy']:['ASR accuracy']);
 });
 
 for(const action of ['pause','stop'] as const) test(`analysis on ${action} includes the confirmed tail without delaying recording control`,async t=>{

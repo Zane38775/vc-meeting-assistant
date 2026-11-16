@@ -1,6 +1,6 @@
 # 在 Apple Silicon Mac 验证与继续开发
 
-本页面向源码开发者。公开下载仍为 v0.1.0，已内置运行时和语音模型，可按安装说明运行。当前源码版本 `0.1.1-beta.1` 是尚未发布的本地候选版。GitHub 自动生成的 `Source code.zip` 用于源码开发。[v0.1.0 Release](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0) · [Mac ZIP](https://github.com/Zane38775/vc-meeting-assistant/releases/download/v0.1.0/VC-Meeting-Assistant-0.1.0-mac-arm64.zip) · [安装说明](START-MAC.md)
+本页面向源码开发者。公开下载仍为 v0.1.0，已内置运行时和语音模型，可按安装说明运行。当前源码版本 `0.1.2-beta.1` 是尚未发布的本地候选版。GitHub 自动生成的 `Source code.zip` 用于源码开发。[v0.1.0 Release](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0) · [Mac ZIP](https://github.com/Zane38775/vc-meeting-assistant/releases/download/v0.1.0/VC-Meeting-Assistant-0.1.0-mac-arm64.zip) · [安装说明](START-MAC.md)
 
 v0.1.0 在 Mac 上遇到 Finder 扩展属性导致的签名失败，采用修订脚本后完成本机签名、启动和真人线下收音。现场发现英文转写、追问质量和材料上传问题。候选源码已成功解析原约 35.2 MB PPTX 的 50 页，摘要曾因 DeepSeek 返回条数超过本地限制而未显示。修订后的摘要已通过实际接口复验；候选安装包的真人复验、腾讯会议双向和长会仍待验收。[验证记录](../VALIDATION.md) · [Mac 设备记录](MAC-DEVICE-VALIDATION-2026-11-16.md)
 
@@ -25,13 +25,15 @@ npm run build
 npm run desktop
 ```
 
-模型下载需要联网，源归档约 437 MiB，实际运行模型约 57 MiB。脚本会核对归档、运行文件和 BPE 术语词表的固定大小及 SHA-256，并生成来源、许可与文件清单。后续识别本身在本机运行。`npm ci` 必须保留可选依赖，以安装 Mac arm64 的原生运行库。
+模型下载需要联网，两个源归档合计约 565 MiB，运行资源合计约 219 MiB。新包默认使用 X-ASR 480 ms，保留旧 Zipformer Small。脚本会核对归档、运行文件和 BPE 术语词表的固定大小及 SHA-256，并生成来源、许可与文件清单。后续识别本身在本机运行。`npm ci` 必须保留可选依赖，以安装 Mac arm64 的原生运行库。
 
 打开软件后创建本机账号，在「服务设置」填写自己的 DeepSeek API Key。仅服务首个注册账号可修改密钥和补充转写术语。没有密钥也可先验证本地转写。分析时相关文字和材料会发送给 DeepSeek，请先用虚构项目或可公开材料验收。
 
 需要通过环境文件配置时，可先执行 `cp .env.example .env` 后在本机编辑 `.env`。该文件被 Git 忽略；不要把密钥写进源码、Issue、日志附件或截图。修改外部环境文件后重启服务。
 
 ## 日常开发与自动检查
+
+若工作目录由 iCloud/FileProvider 管理，文件显示大小不代表实际字节已下载。遇到空读、编译器无版本输出或依赖格式异常时，先核对文件大小与内容，将已校验的源码复制到不受云盘管理的本机目录后重新 `npm ci`。本次在 Documents 复现了此环境问题，不能将空脚本退出码 0 计为测试通过。
 
 桌面模式读取 `dist/`：修改源码后退出应用，重新 `npm run build`，再 `npm run desktop`。窗口关闭后本地服务也会退出。默认端口为 `127.0.0.1:4318`，不要同时启动两个服务。
 
@@ -100,7 +102,7 @@ python3 scripts/archive-mac.py --output-dir ./release-assets
 
 桌面服务把 `DATA_DIR` 指向 Electron 的 `app.getPath('userData')`。Mac 上预期位于 `~/Library/Application Support/VC Meeting Assistant/`；源码模式若应用命名与打包版本不同，以当前 Electron 返回路径为准。目录含 `vc.sqlite`（运行时可能有 `-wal`/`-shm`）、`files/` 和配置 `.env`，以及启用原始音频保存时的 `audio/`。网页开发默认使用仓库下的 `data/`，因此与桌面账号/数据可能不同。
 
-桌面优先加载 `DOTENV_CONFIG_PATH` 指定配置；未指定时，源码模式优先仓库 `.env`，打包模式优先 `.app` 旁的 `.env`，不存在才使用用户数据目录 `.env`。服务设置写入当前选用文件。模型默认在源码 `models/local-asr/` 或应用 `Contents/Resources/models/local-asr/`，也可用 `ASR_MODEL_DIR` 指定。
+桌面优先加载 `DOTENV_CONFIG_PATH` 指定配置；未指定时，源码模式优先仓库 `.env`，打包模式优先 `.app` 旁的 `.env`，不存在才使用用户数据目录 `.env`。服务设置写入当前选用文件。模型默认在源码 `models/local-asr/` 或应用 `Contents/Resources/models/local-asr/`，也可用 `ASR_MODEL_DIR` 指定。新模型位于该目录的 `xasr-480/` 子目录。默认优先使用已安装的新模型；只有旧模型的历史安装继续使用旧模型。可在本机 `.env` 设置 `ASR_MODEL_PROFILE=zipformer-small` 明确回退，或设置 `ASR_MODEL_PROFILE=xasr-480` 强制新模型，随后重启。指定模型缺失或加载失败会报错，不会默默切换。
 
 备份前退出应用并停止开发服务，再完整复制数据目录；不要只复制运行中的 SQLite 主文件。数据目录和配置含私人信息，不应作为 GitHub 问题附件。
 

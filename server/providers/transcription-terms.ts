@@ -15,8 +15,9 @@ export function validateTranscriptionTerms(value: unknown): string {
  return terms.join('\n');
 }
 
-export function localTranscriptionTerms(projectTerms: readonly string[]) {
+export function localTranscriptionTerms(projectTerms: readonly string[], modelingUnit: 'cjkchar+bpe' | 'bpe' = 'cjkchar+bpe') {
  const manual=(process.env.ASR_HOTWORDS||'').split(/\r?\n/);
  const terms=[...manual,...projectTerms].map(term=>term.trim()).filter(valid);
- return [...new Set(terms.map(term=>term.replace(/[ -]+/g,' ').toUpperCase()))].slice(0,MAX_TERMS);
+ const normalize=(term:string)=>modelingUnit==='bpe'?term.replace(/ +/g,' '):term.replace(/[ -]+/g,' ').toUpperCase();
+ return [...new Set(terms.map(normalize))].slice(0,MAX_TERMS);
 }

@@ -4,7 +4,7 @@ import {createHmac} from 'node:crypto';
 import {WebSocket,WebSocketServer} from 'ws';
 import {zipSync,strToU8} from 'fflate';
 import {signTencentURL,mapTencentMessage,createTencentASR} from '../server/providers/tencent';
-import {analyzeContext,decodeSSE,DeepSeekClient,sanitizePublicQuery,validateQuestionDrafts,summarizeMeeting} from '../server/providers/deepseek';
+import {analyzeContext,decodeSSE,DeepSeekClient,prepareProject,sanitizePublicQuery,validateQuestionDrafts,summarizeMeeting} from '../server/providers/deepseek';
 import {parseMaterial} from '../server/materials';
 
 test('Tencent signer signs raw sorted V2 parameters, encodes signature, and never puts secret key on wire',()=>{
@@ -58,6 +58,9 @@ test('coaching request keeps revised and recent final text plus previously dismi
  process.env.DEEPSEEK_API_KEY='unit-test-only';
  t.after(()=>{if(previousKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previousKey;});
  const prior={id:'q1',text:'谁已签付费合同？',quote:'已进入试点',reason:'确认付费牵引力。',segmentIds:['s2'],status:'dismissed' as const,kind:'inference' as const,createdAt:0,evidenceIds:[]};
+ const preparation={generatedAt:1,inspectedPages:1,totalPages:1,excerpted:false,overview:{},
+  hypotheses:{growth:{assumption:'待验证客户试点能否转为付费。',gap:'缺少合作合同。',source:{materialId:'bp',page:1,quote:'已进入试点'}}},
+  questions:[]};
  const segments=Array.from({length:45},(_,i)=>({id:`s${i}`,text:`已完成的发言 ${i}`,final:true,source:'asr' as const,speaker:'A',startMs:i,endMs:i+1,receivedAt:i}));
  const mockFetch=t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
   const request=JSON.parse(init!.body as string);
@@ -67,10 +70,77 @@ test('coaching request keeps revised and recent final text plus previously dismi
   assert.equal(context.segments[0].id,'s0');
   assert.equal(context.segments.at(-1).id,'s44');
   assert.deepEqual(context.questions,[prior]);
+  assert.deepEqual(context.preparation,preparation);
   return Response.json({choices:[{finish_reason:'stop',message:{content:'{"questions":[]}'}}]});
  });
- assert.deepEqual(await analyzeContext({projectName:'Private',segments,questions:[prior],materials:[],newSegmentIds:['s0','s44']}),{questions:[]});
+ assert.deepEqual(await analyzeContext({projectName:'Private',segments,questions:[prior],materials:[],newSegmentIds:['s0','s44'],preparation}),{questions:[]});
  assert.equal(mockFetch.mock.callCount(),1);
+});
+
+test('project preparation validates quotations for the exact file and page and rejects unsupported company figures',async t=>{
+ const previous=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previous===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previous;});
+ const source={materialId:'main-deck',page:2,quote:'3 家企业正在试点'};
+ const question={text:'多少试点已签付费合同？',why:'验证实际付费牵引力。',evidenceWanted:'分客户签约及回款记录。',source};
+ const validQuestions=['试点周期多长？','如何核算交付成本？','客户采用前的主要方案是什么？','有多少部署可由客户自行完成？','采购由哪个部门批准？']
+  .map(text=>({...question,text}));
+ const modelResponse={
+  overview:{
+   customers:{statement:'公司称 3 家企业正在试点。',source},
+   company:{statement:'公司已占 90% 市场份额。',source},
+   product:{statement:'企业工具。',source:{...source,page:1}},
+   technicalApproach:{statement:'公司采用检索增强方式。',source:{...source,page:1,quote:'使用检索增强'}},
+   businessModel:{statement:'公司按年订阅收费。',source:{...source,page:1,quote:'采用年度订阅'}},
+   keyMetrics:{statement:'公司拥有足量试点。',source:{...source,quote:'试'}},
+   financing:{statement:'公司正在融资。',source:{...source,quote:'3'}},
+  },
+  hypotheses:{
+   businessModel:{assumption:'试点可能转为可重复的付费合同。',gap:'材料未提供合同与复购记录。',source},
+   growth:{assumption:'应核对扩张路径。',gap:'需要客户记录。',source:{...source,materialId:'other-deck'}},
+  },
+  questions:[question,{...question,text:'多少试点已签付费合同！'},{...question,text:'错误引用',source:{...source,quote:'30 家客户'}},...validQuestions],
+ };
+ const materials=[
+  {id:'main-deck',name:'BP.pdf',pages:[{page:1,text:'企业服务工具使用检索增强，并采用年度订阅。'},{page:2,text:'当前有 3 家企业正在试点。'}]},
+  {id:'other-deck',name:'Other.pdf',pages:[{page:2,text:'产品部署说明。'}]},
+ ];
+ const input={projectName:'示例项目',materials,totalPages:3,excerpted:false};
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  const body=JSON.parse(init!.body as string);
+  assert.deepEqual(JSON.parse(body.messages[1].content),input);
+  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(modelResponse)}}]});
+ });
+ const prepared=await prepareProject(input);
+ assert.deepEqual(prepared.overview,{
+  customers:modelResponse.overview.customers,
+  technicalApproach:modelResponse.overview.technicalApproach,
+  businessModel:modelResponse.overview.businessModel,
+ });
+ assert.deepEqual(prepared.hypotheses,{businessModel:modelResponse.hypotheses.businessModel});
+ assert.deepEqual(prepared.questions,[question,...validQuestions.slice(0,4)]);
+});
+
+test('project preparation makes one shorter retry for invalid JSON and leaves HTTP failures alone',async t=>{
+ const previous=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previous===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previous;});
+ const result={overview:{},hypotheses:{},questions:[]};
+ const input={projectName:'示例项目',materials:[{id:'bp',name:'bp.txt',pages:[{page:1,text:'示例文字'}]}],totalPages:1,excerpted:false};
+ const prompts:string[]=[];
+ let deny=false;
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  const request=JSON.parse(init!.body as string);
+  prompts.push(request.messages[0].content);
+  if(deny)return new Response('',{status:401});
+  return Response.json({choices:[{finish_reason:'stop',message:{content:prompts.length===1?'invalid JSON':JSON.stringify(result)}}]});
+ });
+ assert.deepEqual(await prepareProject(input),result);
+ assert.equal(prompts.length,2);
+ assert.notEqual(prompts[0],prompts[1]);
+ deny=true;
+ await assert.rejects(prepareProject(input),/HTTP 401/);
+ assert.equal(prompts.length,3);
 });
 
 test('coaching receives only bounded, source-verified public research and still needs fresh transcript grounding',async t=>{

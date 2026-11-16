@@ -19,7 +19,7 @@ test('packaged service serves assets from explicit CLIENT_DIR independent of pro
 import {Store} from '../server/store';
 import type {ASRCallbacks,ProviderAPI} from '../server/providers/contracts';
 const providers={getCapabilities:()=>({deepseek:false,asr:false,model:'test',version:'0.1'}),analyzeContext:async()=>({questions:[]}),researchTopic:async()=>[],summarizeMeeting:async()=> '纪要',summarizeMaterial:async()=> '摘要',createASR:()=>{throw Error('未配置语音服务')}};
-async function setup(t:any) {const dir=await mkdtemp(join(tmpdir(),'vc-test-'));const app=await createApp({dbPath:':memory:',dataDir:dir,providers});await app.ready();t.after(async()=>{await app.close();await rm(dir,{recursive:true,force:true})});return app;}
+async function setup(t:any,appProviders:ProviderAPI=providers) {const dir=await mkdtemp(join(tmpdir(),'vc-test-'));const app=await createApp({dbPath:':memory:',dataDir:dir,providers:appProviders});await app.ready();t.after(async()=>{await app.close();await rm(dir,{recursive:true,force:true})});return app;}
 async function register(app:any,email:string){const res=await app.inject({method:'POST',url:'/api/auth/register',payload:{email,password:'a-strong-password',name:email.split('@')[0]}});assert.equal(res.statusCode,200,res.body);return {cookie:res.headers['set-cookie'].split(';')[0],user:res.json().user};}
 async function project(app:any,cookie:string){const r=await app.inject({method:'POST',url:'/api/projects',headers:{cookie},payload:{name:'项目A'}});assert.equal(r.statusCode,200,r.body);return r.json().project.id;}
 async function meeting(app:any,cookie:string,pid:string){const r=await app.inject({method:'POST',url:`/api/projects/${pid}/meetings`,headers:{cookie},payload:{title:'会议',mode:'offline',demo:true}});assert.equal(r.statusCode,200,r.body);return r.json().meeting.id;}
@@ -77,6 +77,75 @@ function uploadFile(app:Awaited<ReturnType<typeof createApp>>,cookie:string,pid:
  }
  return app.inject({method:'POST',url:`/api/projects/${pid}/materials`,headers:{cookie,'content-type':`multipart/form-data; boundary=${boundary}`},payload:Readable.from(multipartBody())});
 }
+
+test('project preparation is optional for older projects and automatically saved from this project on upload',async t=>{
+ const calls:string[][]=[];
+ const app=await setup(t,{...providers,getCapabilities:()=>({deepseek:true,asr:false,model:'test',version:'test'}),
+  prepareProject:async input=>{
+   calls.push(input.materials.map(m=>m.pages[0].text));
+   const material=input.materials[0];
+   return {overview:{product:{statement:'公司描述其工具用途。',source:{materialId:material.id,page:1,quote:material.pages[0].text}}},hypotheses:{},questions:[]};
+  }});
+ const admin=await register(app,'prep-owner@example.com'),outsider=await register(app,'prep-outsider@example.com');
+ const otherId=await project(app,outsider.cookie),pid=await project(app,admin.cookie);
+ await uploadText(app,outsider.cookie,otherId,'Another project only');
+ const detail=()=>app.inject({url:`/api/projects/${pid}`,headers:{cookie:admin.cookie}}).then(r=>r.json());
+ assert.equal((await detail()).preparation,undefined);
+ const uploaded=await uploadText(app,admin.cookie,pid,'An enterprise support tool');
+ assert.equal(uploaded.statusCode,200,uploaded.body);
+ const record=await detail();
+ assert.deepEqual(calls,[['Another project only'],['An enterprise support tool']]);
+ assert.equal(record.materials[0].summary,'摘要');
+ assert.equal(record.preparation.overview.product.source.materialId,record.materials[0].id);
+ assert.equal(record.preparation.overview.product.source.quote,'An enterprise support tool');
+ assert.equal(record.preparation.inspectedPages,1);
+ assert.equal(record.preparation.totalPages,1);
+ assert.equal((await app.inject({method:'POST',url:`/api/projects/${pid}/preparation`,headers:{cookie:outsider.cookie}})).statusCode,403);
+});
+
+test('project preparation preserves uploaded materials on AI failure and refuses results for concurrently changed pages',{timeout:8000},async t=>{
+ const started=deferred(),release=deferred();
+ let mode:'fail'|'wait'|'succeed'|'empty'='fail';
+ const app=await setup(t,{...providers,getCapabilities:()=>({deepseek:true,asr:false,model:'test',version:'test'}),
+  prepareProject:async input=>{
+   if(mode==='fail')throw new Error('test failure');
+   if(mode==='empty')return {overview:{},hypotheses:{},questions:[]};
+   if(mode==='wait'){started.resolve();await release.promise;}
+   const material=input.materials[0];
+   return {overview:{product:{statement:'公司描述其工具用途。',source:{materialId:material.id,page:1,quote:material.pages[0].text}}},hypotheses:{},questions:[]};
+  }});
+ t.after(release.resolve);
+ const admin=await register(app,'prep-edit@example.com'),pid=await project(app,admin.cookie);
+ const headers={cookie:admin.cookie};
+ const regenerate=()=>app.inject({method:'POST',url:`/api/projects/${pid}/preparation`,headers});
+ const detail=()=>app.inject({url:`/api/projects/${pid}`,headers}).then(r=>r.json());
+ const uploaded=await uploadText(app,admin.cookie,pid,'Old project text');
+ assert.equal(uploaded.statusCode,200,uploaded.body);
+ assert.equal(uploaded.json().preparationWarning,'会前研判未完成，可在项目页重试。');
+ const material=uploaded.json().material;
+ assert.equal(material.summary,'摘要');
+ assert.equal((await detail()).preparation,undefined);
+ mode='succeed';
+ assert.equal((await regenerate()).statusCode,200);
+ mode='wait';
+ const generating=regenerate();
+ await started.promise;
+ try {
+  const edited=await app.inject({method:'PATCH',url:`/api/materials/${material.id}`,headers,payload:{summary:'人工更新',pages:[{page:1,text:'Revised project text'}]}});
+  assert.equal(edited.statusCode,200,edited.body);
+ } finally {release.resolve();}
+ assert.equal((await generating).statusCode,409);
+ const stale=await detail();
+ assert.equal(stale.materials[0].summary,'人工更新');
+ assert.equal(stale.preparation,undefined);
+ assert.equal(stale.preparationStale,true);
+ mode='succeed';
+ assert.equal((await regenerate()).statusCode,200);
+ assert.equal((await detail()).preparation.overview.product.source.quote,'Revised project text');
+ mode='empty';
+ assert.equal((await regenerate()).statusCode,424);
+ assert.equal((await detail()).preparation.overview.product.source.quote,'Revised project text');
+});
 async function snapshotWhen(app:any,cookie:string,mid:string,predicate:(snapshot:any)=>boolean){
  const deadline=Date.now()+2000;
  do{const r=await app.inject({url:`/api/meetings/${mid}`,headers:{cookie}});assert.equal(r.statusCode,200,r.body);const value=r.json();if(predicate(value))return value;await new Promise(r=>setTimeout(r,5));}while(Date.now()<deadline);
