@@ -3,6 +3,17 @@ dist/
 release/
 data/
 .env
+.env.*
+!.env.example
 *.log
 models/
 work/
+.DS_Store
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.zip
+*.dmg

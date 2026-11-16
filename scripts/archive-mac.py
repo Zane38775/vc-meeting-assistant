@@ -1,16 +1,26 @@
-"""Create a Mac-readable ZIP on Windows, preserving POSIX symlinks and executable bits."""
-import hashlib, json, os, plistlib, stat, struct, zipfile
+"""Create a Mac-readable ZIP, preserving POSIX symlinks and executable bits."""
+import argparse, hashlib, json, os, plistlib, re, stat, struct, zipfile
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output-dir', type=Path, default=root / 'release',
+                    help='Directory for the ZIP and SHA256SUMS.txt (default: repository release/)')
+args = parser.parse_args()
+output_dir = args.output_dir.expanduser().resolve()
+version = json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
+assert isinstance(version, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?', version), 'Invalid package version'
 source = root / 'release' / 'VC Meeting Assistant-darwin-arm64'
+if output_dir == source or source in output_dir.parents:
+    parser.error('Output directory must be outside the packaged application folder')
 app = source / 'VC Meeting Assistant.app'
 resources = app / 'Contents' / 'Resources'
-output = root.parent / '知投会议助手-Mac-AppleSilicon-0.1.0.zip'
+output = output_dir / f'VC-Meeting-Assistant-{version}-mac-arm64.zip'
 assert app.is_dir(), 'Build the Mac app first'
 with (app / 'Contents' / 'Info.plist').open('rb') as f:
     info = plistlib.load(f)
 assert info['CFBundleIdentifier'] == 'com.vcmeeting.assistant'
+assert info['CFBundleShortVersionString'] == version, 'Rebuild the Mac app after changing the package version'
 assert info['LSMinimumSystemVersion'] == '14.2'
 assert info.get('NSMicrophoneUsageDescription') and info.get('NSAudioCaptureUsageDescription')
 for binary in [app / 'Contents' / 'MacOS' / info['CFBundleExecutable'], resources / 'app.asar.unpacked/node_modules/sherpa-onnx-darwin-arm64/sherpa-onnx.node', resources / 'app.asar.unpacked/node_modules/@napi-rs/canvas-darwin-arm64/skia.darwin-arm64.node']:
@@ -26,6 +36,8 @@ for entry in provenance['files']:
     b = (model / entry['name']).read_bytes()
     assert len(b) == entry['bytes'] and hashlib.sha256(b).hexdigest() == entry['sha256']
 assert not (model / 'test_wavs').exists()
+assert (root / 'docs' / 'START-MAC.md').is_file(), 'Missing repository installation guide'
+assert (root / 'VALIDATION.md').is_file(), 'Missing validation report'
 
 def add(z, path, archive):
     metadata = zipfile.ZipInfo(archive)
@@ -52,10 +64,11 @@ def add(z, path, archive):
             while chunk := inp.read(1024 * 1024):
                 out.write(chunk)
 
+output_dir.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(output, 'w', allowZip64=True) as z:
     for item in source.iterdir():
         add(z, item, item.name)
-    add(z, root.parent / '开始使用-Mac.md', '开始使用.md')
+    add(z, root / 'docs' / 'START-MAC.md', '开始使用.md')
     add(z, root / 'VALIDATION.md', '验证范围.md')
 with zipfile.ZipFile(output) as z:
     assert z.testzip() is None

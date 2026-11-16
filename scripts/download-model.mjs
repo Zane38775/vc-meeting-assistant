@@ -52,7 +52,7 @@ export async function downloadModel(){
  if(!existsSync(join(dir,'MODEL-CARD.md')))await writeFile(join(dir,'MODEL-CARD.md'),await getText(MODEL.modelCard));
  if(!existsSync(join(dir,'LICENSE')))await writeFile(join(dir,'LICENSE'),await getText('https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/af2d8d81dbfa61c4cea4c568da78f3982edca005/LICENSE'));
  if(!existsSync(join(dir,'LICENSE-ONNXRUNTIME.txt')))await writeFile(join(dir,'LICENSE-ONNXRUNTIME.txt'),await getText('https://raw.githubusercontent.com/microsoft/onnxruntime/main/LICENSE'));
- await writeFile(join(dir,'NOTICE.txt'),'Local ASR model: '+MODEL.name+'\nModel authors: community contributor pfluo; sherpa-onnx export by Fangjun Kuang / next-gen Kaldi team.\nModel source and license declaration: '+MODEL.modelCard+'\nRuntime: sherpa-onnx-node 2.0.1 (Apache-2.0); ONNX Runtime (MIT).\nThe archive includes multiple model variants; this distribution keeps only the verified streaming subset and two public test WAVs. Model weights are unchanged.\n');
+ await writeFile(join(dir,'NOTICE.txt'),'Local ASR model: '+MODEL.name+'\nModel authors: community contributor pfluo; sherpa-onnx export by Fangjun Kuang / next-gen Kaldi team.\nModel source and license declaration: '+MODEL.modelCard+'\nRuntime: sherpa-onnx-node 2.0.1 (Apache-2.0); ONNX Runtime (MIT).\nThe upstream archive includes multiple model variants. The source checkout keeps the verified streaming subset and two public test WAVs; the desktop distribution excludes test WAVs. Model weights are unchanged.\n');
  console.log(`Verified model ready: ${dir}`);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)downloadModel().catch(error=>{console.error(error.message);process.exitCode=1;});

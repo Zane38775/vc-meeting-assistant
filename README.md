@@ -4,6 +4,14 @@
 
 主交付为 Apple Silicon（M 系列）Mac 测试包，要求 macOS 14.2 或以上。中英文流式模型已内置，无需语音云服务密钥或首次下载。应用只需配置 DeepSeek API 才能启用智能分析，未配置时本地转写仍可用。
 
+**[下载 Mac 测试版 v0.1.0](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0)** · [安装说明](docs/START-MAC.md) · [Mac 开发与验收](docs/MAC-DEVELOPMENT.md) · [验证记录](VALIDATION.md)
+
+普通使用者请下载 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本；GitHub 自动生成的 `Source code (zip)` 仅为源码，不是安装包。当前为预发布测试版，未做 Apple Developer ID 签名或公证。
+
+![会议工作台演示截图](docs/assets/meeting-demo.png)
+
+上图是明确标记的演示流程，使用预设对话，不代表真实识别或 DeepSeek 输出。
+
 ## 给使用者
 
 1. 解压 Mac ZIP。按包中的《开始使用》执行 `Install-on-Mac.command`，它安装到当前用户的 Applications 并创建本机签名。没有 Developer ID 签名/公证，不要把本包当作已通过 Mac 实机验收的正式发行版。
@@ -29,6 +37,8 @@
 要求 Node.js 24、npm；Windows/macOS。模型下载的源归档约 437 MiB，但实际运行模型约 57.36 MiB；下载脚本校验固定 SHA256。
 
 ```text
+git clone https://github.com/Zane38775/vc-meeting-assistant.git
+cd vc-meeting-assistant
 npm ci
 node scripts/download-model.mjs
 npm run build
@@ -41,9 +51,12 @@ npm run desktop
 npm test
 npm run typecheck
 npm run package:mac
+python3 scripts/archive-mac.py
 ```
 
 `package:mac` 使用 Electron 官方 Packager，包含 Apple arm64 语音/PDF 运行库及模型。跨平台构建可生成 .app 目录；可信开发者签名、公证与系统音频验收需在 Mac 完成。本机签名脚本不会关闭 Gatekeeper 或移除隔离属性。
+
+归档脚本将可分发 ZIP 和 SHA-256 校验文件写入 `release/`。在 Windows 上使用 `python` 代替 `python3`。详细的更新源码、数据位置、故障排查和 Mac 验收清单见 [Mac 开发指南](docs/MAC-DEVELOPMENT.md)。GitHub Actions 会在 Windows 与 Apple 芯片 macOS runner 上执行测试和构建；Mac 构建附件供开发验证，不等于真实会议收音验收。
 
 ## 共享服务部署
 
