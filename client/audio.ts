@@ -33,7 +33,7 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
   let failed = false;
   let seq = 0;
   let anchor = 0;
-  let finishResolve: (()=>void) | undefined;
+  let finishStop: ((error?: Error) => void) | undefined;
   let stopPromise: Promise<void> | undefined;
   let watchdog: ReturnType<typeof setInterval> | undefined;
   let lastFrame = performance.now();
@@ -51,7 +51,8 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
     options.onLevels({mic:0, system:0});
   };
   const fail = (error: unknown) => {
-    if (failed || state === 'stopping' || state === 'stopped') return;
+    if (state === 'stopping') { finishStop?.(asError(error)); return; }
+    if (failed || state === 'stopped') return;
     failed = true;
     void cleanup();
     options.onError(asError(error));
@@ -127,7 +128,7 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
         processor?.port.postMessage({type:'ack'});
       } else if (data.type === 'levels' && state === 'running') options.onLevels({mic:data.mic, system:data.system});
       else if (data.type === 'error') fail(new Error(data.message));
-      else if (data.type === 'stopped') finishResolve?.();
+      else if (data.type === 'stopped') finishStop?.();
     };
     const connect = (stream: MediaStream, index: number) => {
       // Do not process, encode or retain any display video frames.
@@ -155,13 +156,17 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
         streams.forEach(stream => stream.getTracks().forEach(track => track.stop()));
         stopPromise = (async () => {
           let timeout: ReturnType<typeof setTimeout> | undefined;
-          await new Promise<void>(resolve => {
-            finishResolve = resolve;
-            timeout = setTimeout(resolve, 350);
-            processor?.port.postMessage({type:'stop'});
-          });
-          if (timeout) clearTimeout(timeout);
-          await cleanup();
+          try {
+            await new Promise<void>((resolve, reject) => {
+              finishStop = error => { if (error) reject(error); else resolve(); };
+              timeout = setTimeout(() => reject(new Error('等待最后一段音频确认超时')), 350);
+              processor?.port.postMessage({type:'stop'});
+            });
+          } finally {
+            clearTimeout(timeout);
+            finishStop = undefined;
+            await cleanup();
+          }
         })();
         return stopPromise;
       },

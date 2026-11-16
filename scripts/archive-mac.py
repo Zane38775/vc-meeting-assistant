@@ -30,7 +30,7 @@ for binary in [app / 'Contents' / 'MacOS' / info['CFBundleExecutable'], resource
 assert (resources / 'app.asar.unpacked/dist/server/local-worker.cjs').is_file()
 model = resources / 'models/local-asr'
 provenance = json.loads((model / 'MODEL-PROVENANCE.json').read_text(encoding='utf-8'))
-for entry in provenance['files']:
+for entry in [*provenance['files'], provenance['vocabulary']]:
     if entry['name'].startswith('test_wavs/'):
         continue
     b = (model / entry['name']).read_bytes()

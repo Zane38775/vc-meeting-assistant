@@ -28,7 +28,7 @@ if [ ! -d "$source_app/Contents" ]; then
   printf '%s\n' "请先解压应用，并将此脚本与 $app_name 放在同一文件夹后重试。"
   exit 1
 fi
-for required in /usr/bin/codesign /usr/bin/ditto /usr/libexec/PlistBuddy /usr/bin/file; do
+for required in /usr/bin/codesign /usr/bin/ditto /usr/libexec/PlistBuddy /usr/bin/file /usr/bin/xattr; do
   if [ ! -x "$required" ]; then printf '缺少系统工具：%s\n' "$required"; exit 1; fi
 done
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source_app/Contents/Info.plist")
@@ -56,6 +56,10 @@ trap 'exit 130' INT TERM
 staged_app="$stage/$app_name"
 printf '%s\n' '正在复制应用并为当前 Mac 创建本地签名…'
 /usr/bin/ditto "$source_app" "$staged_app"
+# Remove only signing-incompatible Finder metadata on the staged copy.
+# Preserve com.apple.quarantine and all other security attributes.
+/usr/bin/xattr -drs com.apple.FinderInfo "$staged_app"
+/usr/bin/xattr -drs com.apple.ResourceFork "$staged_app"
 
 # Preserve existing executable entitlements before replacing inner signatures.
 # Frameworks and shared libraries receive NO entitlements; host executables own
@@ -118,5 +122,5 @@ printf '%s\n' \
   '脚本没有修改 Gatekeeper、移除隔离属性或更改系统安全设置。' \
   '首次打开时，macOS 仍可能阻止未公证应用；请按系统提示在“隐私与安全性”中审核是否允许。' \
   '麦克风和系统音频授权会在你点击“开始录音”时请求；会议数据与 .env 配置保留在用户应用数据目录。' \
-  '此安装流程尚未在 Mac 真机执行验证。如系统仍拒绝启动，请保留错误提示，不要关闭系统安全保护。'
-read -r -p '按回车结束。' _
+  '如系统仍拒绝启动，请保留错误提示，不要关闭系统安全保护。'
+if [ -t 0 ]; then read -r -p '按回车结束。' _; fi

@@ -1,10 +1,18 @@
 import {packager} from '@electron/packager';
 import {readFile,mkdir,cp} from 'node:fs/promises';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {prepareMacNatives} from './prepare-mac-natives.mjs';
 await prepareMacNatives();
 const pkg=JSON.parse(await readFile('package.json','utf8'));
-const outputs=await packager({dir:process.cwd(),name:'VC Meeting Assistant',platform:'darwin',arch:'arm64',electronVersion:pkg.devDependencies.electron,out:'release',overwrite:true,prune:true,
+const electronZipDir=process.env.ELECTRON_ZIP_DIR;
+if(electronZipDir){
+ const name=`electron-v${pkg.devDependencies.electron}-darwin-arm64.zip`;
+ const checksums=JSON.parse(await readFile('node_modules/electron/checksums.json','utf8'));
+ const digest=createHash('sha256').update(await readFile(path.join(electronZipDir,name))).digest('hex');
+ if(digest!==checksums[name])throw new Error('Local Electron ZIP checksum mismatch');
+}
+const outputs=await packager({dir:process.cwd(),name:'VC Meeting Assistant',platform:'darwin',arch:'arm64',electronVersion:pkg.devDependencies.electron,electronZipDir,out:'release',overwrite:true,prune:true,
  appBundleId:'com.vcmeeting.assistant',appVersion:pkg.version,appCategoryType:'public.app-category.productivity',
  asar:{unpack:'{**/*.node,**/*.dylib,**/*.dll,**/local-worker.cjs,**/sherpa-onnx*/**/*,**/pdfjs-dist/**/*}'},
  ignore:[/^\/(?:\.git|\.github|\.env(?:\..*)?|release|work|data|models|tests|server|client|shared|scripts|docs|node_modules\/\.cache|node_modules\/sherpa-onnx-win-x64|node_modules\/@napi-rs\/canvas-win32-x64-msvc)(?:\/|$)/,/^\/(?:tsconfig\.json|vite\.config\.ts|package-lock\.json)$/],

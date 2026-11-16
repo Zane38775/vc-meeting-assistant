@@ -127,7 +127,7 @@ test('desktop original-material downloads allow only exact authenticated-origin 
   ]) assert.equal(allowedMaterialFileUrl(url,origin),false,url);
 });
 
-async function captureHarness(mediaDevices: object, active = true) {
+async function captureHarness(mediaDevices: object, active = true, browser: object = {}) {
   const result = await build({entryPoints:[fileURLToPath(new URL('../client/audio.ts', import.meta.url))],bundle:true,write:false,format:'cjs',plugins:[{
     name:'worklet-asset', setup(build) {
       build.onResolve({filter:/\?worker&url$/}, () => ({path:'worklet',namespace:'test-asset'}));
@@ -135,7 +135,7 @@ async function captureHarness(mediaDevices: object, active = true) {
     },
   }]});
   const scope = {module:{exports:{} as any}, navigator:{userActivation:{isActive:active},mediaDevices},
-    window:{AudioContext:class {}}, performance, setTimeout, clearTimeout, setInterval, clearInterval, console};
+    window:{AudioContext:class {}}, performance, setTimeout, clearTimeout, setInterval, clearInterval, console, ...browser};
   runInNewContext(result.outputFiles[0].text, scope);
   return scope.module.exports.captureAudio;
 }
@@ -168,4 +168,74 @@ test('microphone permission resolving after display rejection is released immedi
   grant(mic);
   await new Promise(resolve => setTimeout(resolve,0));
   assert.equal(mic.track.readyState,'ended');
+});
+
+async function activeCapture() {
+  const mic = fakeStream();
+  const frames: string[] = [];
+  const messages: string[] = [];
+  let receive: (data: object) => void = () => {};
+  class Context {
+    state = 'running';
+    currentTime = 1;
+    destination = {};
+    audioWorklet = {addModule: async () => {}};
+    async resume() {}
+    async close() { this.state = 'closed'; }
+    createMediaStreamSource() { return {connect() {}, disconnect() {}}; }
+  }
+  class Worklet {
+    port = {
+      onmessage: null as ((event: {data: object}) => void) | null,
+      postMessage: (message: {type: string}) => messages.push(message.type),
+      close() {},
+    };
+    constructor() { receive = data => this.port.onmessage?.({data}); }
+    connect() {}
+    disconnect() {}
+  }
+  let expire: () => void = () => {};
+  const capture = await captureHarness({getUserMedia: async () => mic}, true, {
+    window: {AudioContext: Context},
+    AudioContext: Context,
+    AudioWorkletNode: Worklet,
+    MediaStream: class {},
+    btoa,
+    setTimeout(fn: () => void) { expire = fn; return 1; },
+    clearTimeout() {},
+  });
+  const handle = await capture({mode: 'offline', ...captureCallbacks, onChunk: ({pcm}: {pcm: string}) => frames.push(pcm)});
+  return {handle, mic, messages, frames, receive, expire: () => expire()};
+}
+
+test('stop forwards the tail frame before accepting a delayed worklet confirmation', async () => {
+  const fixture = await activeCapture();
+  const stopping = fixture.handle.stop();
+  let finished = false;
+  void stopping.then(() => { finished = true; });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  fixture.receive({type: 'frame', pcm: Uint8Array.of(1, 0).buffer, at: 1});
+  fixture.receive({type: 'stopped'});
+  await stopping;
+  assert.deepEqual(fixture.frames, ['AQA=']);
+  assert.deepEqual(fixture.messages, ['stop', 'ack']);
+  assert.equal(fixture.mic.track.readyState, 'ended');
+});
+
+test('stop rejects when a suspended worklet cannot confirm the tail', async () => {
+  const fixture = await activeCapture();
+  const stopping = fixture.handle.stop();
+  fixture.expire();
+  await assert.rejects(stopping, /最后一段音频.*超时/);
+  assert.equal(fixture.mic.track.readyState, 'ended');
+});
+
+test('a worklet error during stop is visible even when a stopped message follows', async () => {
+  const fixture = await activeCapture();
+  const stopping = fixture.handle.stop();
+  fixture.receive({type: 'error', message: '音频处理落后超过 1 秒'});
+  fixture.receive({type: 'stopped'});
+  await assert.rejects(stopping, /音频处理落后/);
+  assert.equal(fixture.mic.track.readyState, 'ended');
 });

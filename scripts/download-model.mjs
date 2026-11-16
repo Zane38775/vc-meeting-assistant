@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {createReadStream,createWriteStream,existsSync} from 'node:fs';
-import {mkdir,rename,stat,writeFile} from 'node:fs/promises';
+import {copyFile,mkdir,rename,stat,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {Readable,Transform} from 'node:stream';
@@ -14,6 +14,11 @@ export const MODEL={
  license:'Apache-2.0',
  modelCard:'https://huggingface.co/csukuangfj/k2fsa-zipformer-bilingual-zh-en-t/raw/e2382758de9a0219b4efe682b95af30b399db3b8/README.md',
  documentation:'https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html#sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16-bilingual-chinese-english',
+ vocabulary:{
+  name:'bpe.vocab',bytes:12564,sha256:'d0b642f3a2eacd5fadefdeff9e0e1358cab729647cbb7fe58cf738e1f7407029',
+  source:'https://huggingface.co/csukuangfj/k2fsa-zipformer-bilingual-zh-en-t/blob/e2382758de9a0219b4efe682b95af30b399db3b8/data/lang_char_bpe/bpe.vocab',
+  license:'Apache-2.0',
+ },
  files:[
   {name:'encoder-epoch-99-avg-1.int8.onnx',bytes:42980793,sha256:'db6f51551762e40e549166fe041ea3e45464370b595e9ad23f06478ec3794fbb'},
   {name:'decoder-epoch-99-avg-1.onnx',bytes:13877276,sha256:'89be509a83175261695bdef5fd1c7b9ab1129a663d1284e7ba9f8507b21e0906'},
@@ -48,7 +53,12 @@ export async function downloadModel(){
   if(result.error||result.status!==0)throw new Error('Model extraction failed; install tar/bsdtar and retry');
   for(const file of MODEL.files)await verifyFile(join(dir,file.name),file);
  }
- await writeFile(join(dir,'MODEL-PROVENANCE.json'),JSON.stringify({...MODEL,runtime:'sherpa-onnx-node@2.0.1',quantization:'encoder INT8, decoder FP32, joiner INT8',runtimeBytes:MODEL.files.slice(0,4).reduce((sum,f)=>sum+f.bytes,0)},null,2)+'\n');
+ const vocabulary=join(root,'scripts','model-assets','zipformer-bpe.vocab');
+ await verifyFile(vocabulary,MODEL.vocabulary);
+ const installedVocabulary=join(dir,MODEL.vocabulary.name);
+ await copyFile(vocabulary,installedVocabulary);
+ await verifyFile(installedVocabulary,MODEL.vocabulary);
+ await writeFile(join(dir,'MODEL-PROVENANCE.json'),JSON.stringify({...MODEL,runtime:'sherpa-onnx-node@2.0.1',quantization:'encoder INT8, decoder FP32, joiner INT8',runtimeBytes:MODEL.files.slice(0,4).reduce((sum,f)=>sum+f.bytes,MODEL.vocabulary.bytes)},null,2)+'\n');
  if(!existsSync(join(dir,'MODEL-CARD.md')))await writeFile(join(dir,'MODEL-CARD.md'),await getText(MODEL.modelCard));
  if(!existsSync(join(dir,'LICENSE')))await writeFile(join(dir,'LICENSE'),await getText('https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/af2d8d81dbfa61c4cea4c568da78f3982edca005/LICENSE'));
  if(!existsSync(join(dir,'LICENSE-ONNXRUNTIME.txt')))await writeFile(join(dir,'LICENSE-ONNXRUNTIME.txt'),await getText('https://raw.githubusercontent.com/microsoft/onnxruntime/main/LICENSE'));

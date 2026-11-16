@@ -2,8 +2,10 @@ import {extname,posix} from 'node:path';
 import {unzipSync} from 'fflate';
 import {XMLParser,XMLValidator} from 'fast-xml-parser';
 import type {MaterialPage} from '../shared/types';
+import {MATERIAL_FILE_LIMIT_MESSAGE,MAX_MATERIAL_FILE_BYTES} from '../shared/material-limits';
 
-const MAX_FILE=30*1024*1024,MAX_PAGES=100,MAX_TEXT=2*1024*1024;
+const MAX_PAGES=100;
+export const MAX_MATERIAL_TEXT=2*1024*1024;
 const EMPTY='该页没有可提取文字，可能为图像或扫描页；尚未进行 OCR，请核对原文件并补充文字。';
 const xmlParser=new XMLParser({ignoreAttributes:false,transformTagName:name=>name.split(':').at(-1)!,parseTagValue:false,trimValues:false,processEntities:true});
 function xml(bytes:Uint8Array){const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(/<!DOCTYPE|<!ENTITY/i.test(text)||XMLValidator.validate(text)!==true)throw new Error('PPTX XML 格式错误或包含不支持的实体');return xmlParser.parse(text);}
@@ -47,18 +49,20 @@ async function parsePptx(buffer:Buffer):Promise<MaterialPage[]>{
 }
 async function parsePdf(buffer:Buffer):Promise<MaterialPage[]>{
  if(!buffer.subarray(0,1024).includes(Buffer.from('%PDF-')))throw new Error('PDF 文件头无效');
- const {getDocument}=await import('pdfjs-dist/legacy/build/pdf.mjs');
+ const {getDocument,GlobalWorkerOptions}=await import('pdfjs-dist/legacy/build/pdf.mjs');
+ // PDF.js skips its Node default in Electron utility processes.
+ GlobalWorkerOptions.workerSrc ||= import.meta.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
  const task=getDocument({data:new Uint8Array(buffer),disableFontFace:true,useSystemFonts:false,stopAtErrors:true,verbosity:0});
  let timer:ReturnType<typeof setTimeout>|undefined;
  const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{void task.destroy();reject(new Error('PDF 解析超时，请拆分文件后重试'));},30000);});
  try{return await Promise.race([(async()=>{const doc=await task.promise;if(doc.numPages>MAX_PAGES)throw new Error('材料最多支持 100 页');const pages:MaterialPage[]=[];let total=0;
-  for(let page=1;page<=doc.numPages;page++){const pdfPage=await doc.getPage(page);const content=await pdfPage.getTextContent();const text=content.items.map(item=>'str'in item?`${item.str}${item.hasEOL?'\n':' '}`:'').join('').trim();total+=text.length;if(total>MAX_TEXT)throw new Error('材料提取文字超过 2 MiB 限制');pages.push({page,text,...(!text?{warning:EMPTY}:{})});pdfPage.cleanup();}return pages;})(),timeout]);}
+  for(let page=1;page<=doc.numPages;page++){const pdfPage=await doc.getPage(page);const content=await pdfPage.getTextContent();const text=content.items.map(item=>'str'in item?`${item.str}${item.hasEOL?'\n':' '}`:'').join('').trim();total+=text.length;if(total>MAX_MATERIAL_TEXT)throw new Error('材料提取文字超过 2 MiB 限制');pages.push({page,text,...(!text?{warning:EMPTY}:{})});pdfPage.cleanup();}return pages;})(),timeout]);}
  catch(e){if(e instanceof Error&&/100 页|限制|超时/.test(e.message))throw e;throw new Error('PDF 无法解析，可能已加密或文件损坏');}
  finally{if(timer)clearTimeout(timer);await task.destroy();}
 }
 export async function parseMaterial(buffer:Buffer,name:string):Promise<{pages:MaterialPage[];warning?:string}>{
  if(!Buffer.isBuffer(buffer)||!buffer.length)throw new Error('材料文件为空');
- if(buffer.length>MAX_FILE)throw new Error('材料文件不能超过 30 MiB');
+ if(buffer.length>MAX_MATERIAL_FILE_BYTES)throw new Error(MATERIAL_FILE_LIMIT_MESSAGE);
  const ext=extname(name).toLowerCase();let pages:MaterialPage[];
  if(ext==='.pdf')pages=await parsePdf(buffer);else if(ext==='.pptx')pages=await parsePptx(buffer);else if(['.txt','.md'].includes(ext)){
   let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(buffer);}catch{throw new Error('文字材料请使用 UTF-8 编码');}
@@ -66,6 +70,6 @@ export async function parseMaterial(buffer:Buffer,name:string):Promise<{pages:Ma
   pages=text.split('\f').map((text,index)=>({page:index+1,text:text.trim(),...(!text.trim()?{warning:'该页为空白。'}:{})}));
  }else throw new Error('材料格式仅支持 PDF、PPTX、TXT、MD');
  if(pages.length>MAX_PAGES)throw new Error('材料最多支持 100 页');
- if(pages.reduce((n,p)=>n+p.text.length,0)>MAX_TEXT)throw new Error('材料提取文字超过 2 MiB 限制');
+ if(pages.reduce((n,p)=>n+p.text.length,0)>MAX_MATERIAL_TEXT)throw new Error('材料提取文字超过 2 MiB 限制');
  const warnings=pages.filter(p=>p.warning);return {pages,...(warnings.length?{warning:`${warnings.length} 页存在解析警告；保留原始页码，未提取文字的页面需人工补充。`}:{})};
 }

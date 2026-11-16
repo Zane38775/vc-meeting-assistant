@@ -12,7 +12,21 @@ function emit(final=false){
 function decode(){while(recognizer.isReady(stream))recognizer.decode(stream);}
 try{
  const {OnlineRecognizer}=require('sherpa-onnx-node');
- recognizer=new OnlineRecognizer({featConfig:{sampleRate:16000,featureDim:80},modelConfig:{transducer:{encoder:join(workerData.modelDir,'encoder-epoch-99-avg-1.int8.onnx'),decoder:join(workerData.modelDir,'decoder-epoch-99-avg-1.onnx'),joiner:join(workerData.modelDir,'joiner-epoch-99-avg-1.int8.onnx')},tokens:join(workerData.modelDir,'tokens.txt'),numThreads:workerData.numThreads||2,provider:'cpu',modelType:'zipformer',debug:0},decodingMethod:'greedy_search',enableEndpoint:true,rule1MinTrailingSilence:2.4,rule2MinTrailingSilence:1.2,rule3MinUtteranceLength:20});
+ const hotwordsBuf=(workerData.hotwords||[]).join('\n');
+ const modelConfig={
+  transducer:{encoder:join(workerData.modelDir,'encoder-epoch-99-avg-1.int8.onnx'),decoder:join(workerData.modelDir,'decoder-epoch-99-avg-1.onnx'),joiner:join(workerData.modelDir,'joiner-epoch-99-avg-1.int8.onnx')},
+  tokens:join(workerData.modelDir,'tokens.txt'),numThreads:workerData.numThreads||2,provider:'cpu',modelType:'zipformer',debug:0,
+ };
+ if(hotwordsBuf){
+  modelConfig.modelingUnit='cjkchar+bpe';
+  modelConfig.bpeVocab=join(workerData.modelDir,'bpe.vocab');
+ }
+ recognizer=new OnlineRecognizer({
+  featConfig:{sampleRate:16000,featureDim:80},modelConfig,
+  decodingMethod:hotwordsBuf?'modified_beam_search':'greedy_search',
+  ...(hotwordsBuf?{hotwordsBuf,hotwordsBufSize:Buffer.byteLength(hotwordsBuf),hotwordsScore:2,maxActivePaths:4}:{}),
+  enableEndpoint:true,rule1MinTrailingSilence:2.4,rule2MinTrailingSilence:1.2,rule3MinUtteranceLength:20,
+ });
  stream=recognizer.createStream();
  parentPort.on('message',message=>{
   if(finished)return;

@@ -4,6 +4,7 @@ import {createRequire} from 'node:module';
 import {existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {localTranscriptionTerms} from './transcription-terms';
 export const LOCAL_MODEL_FILES=['encoder-epoch-99-avg-1.int8.onnx','decoder-epoch-99-avg-1.onnx','joiner-epoch-99-avg-1.int8.onnx','tokens.txt'];
 export function localModelDirectory():string {return resolve(process.env.ASR_MODEL_DIR||join((process as NodeJS.Process&{resourcesPath?:string}).resourcesPath||process.cwd(),'models','local-asr'));}
 export function localASRAvailable():boolean {
@@ -12,12 +13,15 @@ export function localASRAvailable():boolean {
 }
 interface WorkerChannel {postMessage(value:any,transferList?:ArrayBuffer[]):void;on(event:string,listener:(...args:any[])=>void):unknown;terminate():Promise<number>}
 let activeWorkers=0;
-export function createLocalASR(callbacks:ASRCallbacks,options:{modelDir?:string;workerFactory?:(url:URL,data:any)=>WorkerChannel;startupMs?:number;processingMs?:number;finishMs?:number}={}):ASRSession {
+export function createLocalASR(callbacks:ASRCallbacks,options:{modelDir?:string;hotwords?:readonly string[];workerFactory?:(url:URL,data:any)=>WorkerChannel;startupMs?:number;processingMs?:number;finishMs?:number}={}):ASRSession {
  const modelDir=options.modelDir||localModelDirectory();
  if(!LOCAL_MODEL_FILES.every(name=>existsSync(join(modelDir,name))))throw new Error('本地语音模型缺失，请运行模型下载脚本或重新安装完整应用');
  if(activeWorkers>=2)throw new Error('本机同时最多运行两路实时转写，请先停止另一场会议');
  const workerURL=new URL('./local-worker.cjs',import.meta.url);
- const workerData={modelDir,numThreads:2};
+ const requestedHotwords=localTranscriptionTerms(options.hotwords||[]);
+ const vocabularyMissing=requestedHotwords.length>0&&!existsSync(join(modelDir,'bpe.vocab'));
+ const hotwords=vocabularyMissing?[]:requestedHotwords;
+ const workerData={modelDir,numThreads:2,hotwords};
  const worker=options.workerFactory?options.workerFactory(workerURL,workerData):new Worker(workerURL,{workerData,resourceLimits:{maxOldGenerationSizeMb:128}});
  activeWorkers++;
  const sessionId=randomUUID();let ready=false,closed=false,ending=false,finishSent=false,sequence=0,totalBytes=0,released=false;
@@ -32,7 +36,12 @@ export function createLocalASR(callbacks:ASRCallbacks,options:{modelDir?:string;
  const watchdog=setInterval(()=>{if([...pending.values()].some(item=>Date.now()-item.at>(options.processingMs??8000)))fail(new Error('本地转写处理超时，已停止以避免音频持续积压'));},250);
  worker.on('message',(message:any)=>{
   if(closed)return;
-  if(message?.type==='ready'){ready=true;clearTimeout(startTimer);callbacks.onStatus('本地实时转写已就绪（中文 / English，音频留在本机）');send();}
+  if(message?.type==='ready'){
+   ready=true;clearTimeout(startTimer);
+   const note=vocabularyMissing?'，当前模型缺少术语词表，已使用普通转写':hotwords.length?`，已参考 ${hotwords.length} 个术语`:'';
+   callbacks.onStatus('本地实时转写已就绪（中文 / English，音频留在本机）'+note);
+   send();
+  }
   else if(message?.type==='ack'){const item=pending.get(message.seq);if(item){totalBytes-=item.bytes;pending.delete(message.seq);}}
   else if(message?.type==='segment'){
    const s=message.segment;
