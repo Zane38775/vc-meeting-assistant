@@ -1,0 +1,109 @@
+{
+  "name": "vc-meeting-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "实时 VC 会议助手",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite --host 127.0.0.1\"",
+    "build": "tsc --noEmit && vite build && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server/index.js && node scripts/copy-runtime.mjs",
+    "start": "node --env-file-if-exists=.env dist/server/index.js",
+    "desktop": "electron .",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "package:win": "npm run build && electron-builder --win portable --x64",
+    "package:mac": "npm run build && node scripts/package-mac.mjs",
+    "model:download": "node scripts/download-model.mjs"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^9.3.0",
+    "@fastify/static": "^10.1.11",
+    "@fastify/websocket": "^11.2.0",
+    "dotenv": "^17.2.3",
+    "fast-xml-parser": "^5.3.0",
+    "fastify": "^5.12.8",
+    "fflate": "^0.8.2",
+    "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^6.5.438",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sherpa-onnx-node": "2.0.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "electron": "45.3.3",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.12",
+    "playwright": "^1.56.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  },
+  "build": {
+    "appId": "com.vcmeeting.assistant",
+    "productName": "VC Meeting Assistant",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "asarUnpack": [
+      "node_modules/pdfjs-dist/**/*",
+      "node_modules/sherpa-onnx*/**/*",
+      "dist/server/local-worker.cjs"
+    ],
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "models/local-asr",
+        "to": "models/local-asr",
+        "filter": [
+          "*.onnx",
+          "tokens.txt",
+          "*.json",
+          "*.md",
+          "LICENSE*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "14.2",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "用于在您主动开始会议时实时转写发言，语音识别在本机进行。",
+        "NSAudioCaptureUsageDescription": "用于在您主动开始线上会议录音时收取远端参会者声音。",
+        "NSScreenCaptureUsageDescription": "用于选择线上会议的系统音频来源，不保存屏幕画面。"
+      }
+    },
+    "artifactName": "VC-Meeting-Assistant-${version}-${arch}.${ext}"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-darwin-arm64": "2.0.1"
+  },
+  "productName": "VC Meeting Assistant"
+}
