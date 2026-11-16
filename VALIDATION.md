@@ -4,7 +4,7 @@
 
 默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.2-beta.2` 是尚未发布的本地候选版。
 
-本轮 X-ASR 接入、会前研判、108 项测试、真实 DeepSeek 检查和本机文件读取问题详见 [2026-11-17 开发进度](docs/DEVELOPMENT-PROGRESS-2026-11-17.md)。下面保留之前版本的实测证据，版本和测量窗口不能混用。
+本轮 X-ASR 接入、会前研判、110 项测试、真实 DeepSeek 检查和本机文件读取问题详见 [2026-11-17 开发进度](docs/DEVELOPMENT-PROGRESS-2026-11-17.md)。下面保留之前版本的实测证据，版本和测量窗口不能混用。
 
 - 0.1.1 候选版的本机 `RUN_LOCAL_ASR_REALTIME=1 npm test` 在 Apple Silicon 和 Node 24 上运行 98 项，全部通过且零跳过，包含真实模型实时节奏检查。
 - PR #1 的先前代码提交为 `3d6af1d2547f9da618ce1b41e4266cf1f647a6b5`。该提交的 Windows 与 macOS CI 均通过，Mac 构建、归档检查及开发产物上传已完成。[PR #1](https://github.com/Zane38775/vc-meeting-assistant/pull/1) · [CI 运行](https://github.com/Zane38775/vc-meeting-assistant/actions/runs/43901975366)

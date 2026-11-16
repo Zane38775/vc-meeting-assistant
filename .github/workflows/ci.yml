@@ -49,7 +49,7 @@ jobs:
           key: local-asr-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/download-model.mjs') }}
 
       # Always run the downloader: a cache hit must still pass its pinned hashes.
-      # Only the ~58 MiB runtime subset and public WAV samples are cached.
+      # Only the ~219 MiB runtime subsets and public WAV samples are cached.
       - name: Download or verify local speech model
         run: npm run model:download
 
