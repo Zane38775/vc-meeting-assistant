@@ -1,12 +1,13 @@
-# 验证记录 · 2026-11-16
+# 验证记录 · 2026-11-16 至 17
 
 ## 版本与当前证据
 
 默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.1-beta.1` 是尚未发布的本地候选版。
 
-- 最终本机 `RUN_LOCAL_ASR_REALTIME=1 npm test` 在 Apple Silicon / Node24 上运行98项，98通过、0失败、0跳过，包含真实模型实时节奏检查。
+- 本轮本机 `RUN_LOCAL_ASR_REALTIME=1 npm test` 在 Apple Silicon 和 Node 24 上运行 98 项，全部通过且零跳过，包含真实模型实时节奏检查。
+- PR #1 的远端分支 `codex/mac-device-validation` 指向 `3d6af1d2547f9da618ce1b41e4266cf1f647a6b5`。该提交的 Windows 与 macOS CI 均通过，Mac 构建、归档检查及开发产物上传已完成。[PR #1](https://github.com/Zane38775/vc-meeting-assistant/pull/1) · [CI 运行](https://github.com/Zane38775/vc-meeting-assistant/actions/runs/43901975366)
 - Mac 本地模型以公开 WAV 按 200 ms 送入。两个样例从音频开始到首条暂定结果分别约 1.22 秒和 1.42 秒，最后一帧到定稿分别约 65 ms 和 27 ms。自然停顿分句及后续发言通过。此为单次短样例测量，真人准确率、设备录音与长会性能单独验收。
-- 术语回归覆盖页码、原文引文、页内词边界、材料修改后的重验和项目隔离。术语进入本地模型解码，历史转写保留原样。术语对真人中英混语准确性的效果待复验。
+- 术语回归覆盖页码、原文引文、页内词边界、材料修改后的重验和项目隔离。术语进入本地模型解码。候选包的真人中英混语复验仍有误识，见下文。
 - 追问回归覆盖 80 个新增有效字符门槛、实时轮次至少间隔 30 秒、尾句确认后的补分析、每轮至多一问或零问，以及同证据改写的抑制。中文资料整理回归检查搜索原文引文和来源关联，整理范围限于搜索摘要，保留原来源和失败状态。
 - Mac Electron 45.3.3 的真实 utility process 与 ASAR 中，旧服务上传合成 PDF 返回 `No "GlobalWorkerOptions.workerSrc" specified.`，修复后的服务返回第 1 页文字，原件下载逐字节一致。
 
@@ -27,18 +28,22 @@
 
 ## Mac 安装与用户设备
 
-早期 v0.1.0 由 Electron 官方 Packager 从 Windows 构建 Apple arm64 `.app`，附带约 57.36 MiB 模型、sherpa arm64 `.node/.dylib`、PDF 解析所需 arm64 canvas 模块、`local-worker.cjs` 和隐私用途描述。后来在 M1 Mac 上运行了发布版及候选源码。
+早期 v0.1.0 由 Electron 官方 Packager 从 Windows 构建 Apple arm64 `.app`，附带约 57.36 MiB 模型、sherpa arm64 `.node/.dylib`、PDF 解析所需 arm64 canvas 模块、`local-worker.cjs` 和隐私用途描述。后来在 M1 Mac 上运行了发布版、候选源码及候选安装版。
 
 - v0.1.0 安装时因 Finder 扩展属性发生签名失败。修订脚本仅在暂存副本移除 `com.apple.FinderInfo` 和 `com.apple.ResourceFork`，保留隔离属性。使用修订脚本通过本机签名检查并成功启动。该次下载经命令行，浏览器下载后的 Gatekeeper 流程仍待验收。
 - v0.1.0 的真实线下麦克风会议产生 15 条定稿并成功暂停。约两分钟产生 18 条 DeepSeek 追问和 45 条搜索证据，链路可用。使用者认为追问频繁、重复且浅显，中英混语技术词出现误识。真实的公开虚构 Markdown 摘要在独立验收账号通过。
-- v0.1.0 曾拒绝约 35.2 MB 的 PPTX。候选源码启用 100 MiB 上限后，使用者重新上传同一文件，成功解析 50 页。DeepSeek 返回 HTTP 200 和合法 JSON，其中有 15 条要点，超过旧本地校验的 12 条上限，整份摘要被拒绝。候选版改为逐条核验有效要点并提示显示范围，实际接口复验7.4秒生成10条有效要点与17个有原文依据的术语，候选界面与真人效果待复验。
-- 候选版已在 Mac 上生成 Apple arm64 `.app`。候选 ZIP 的本机安装复验、Apple Developer ID 签名及公证均待完成。[Mac 用户设备验收](docs/MAC-DEVICE-VALIDATION-2026-11-16.md)
+- v0.1.0 曾拒绝约 35.2 MB 的 PPTX。候选源码启用 100 MiB 上限后，同一文件成功解析 50 页。摘要曾因 DeepSeek 的 15 条要点超出旧本地校验上限而被拒绝。修订后，候选安装版通过界面完成同一份 BP 的提取，状态为 `ready`，摘要 1,410 字符，保存 23 个术语。其中有 `home party`，未提取 `ACE-Step`。
+- `0.1.1-beta.1` ZIP 为 213,337,346 字节，SHA-256 为 `9cc08cbddcd98c18b4e45cc6833d9e68ab0527225f4995a9e40f5134456b3354`。核对后从 ZIP 解压安装，`codesign --verify --deep --strict` 通过，升级前后数据库 `records` 的哈希完全一致。Apple Developer ID 签名及公证仍待完成。
+- 候选安装版的 HTTP API 用 1,113 ms 上传并解析合成 PDF，返回 HTTP 200 和 1 页，原件下载逐字节一致。实际 PDF 界面操作待复验。
+- 候选安装版的真人指定语句中，`home party` 识别为「红 PARTY」，`ACE-Step` 识别为「A STEP」。定稿保存到「推理成本」，最后一句缺失。该会话未保留原始 PCM，缺失原因待确认。该轮 DeepSeek 追问分析耗时 773 ms，输出 0 问。[Mac 用户设备验收](docs/MAC-DEVICE-VALIDATION-2026-11-16.md)
+
+使用者已要求更换识别质量更好的模型。正在比较 X-ASR、Whisper 和 Fun-ASR，当前候选包仍使用本地 Zipformer。
 
 ## 仍待实机验证
 
-1. 候选 ZIP 的干净安装、麦克风拒绝后重新授权，以及同一批真实资料和会议回归。
-2. 真人中英文混语准确性、术语提示效果、尾句与字幕延迟。腾讯会议双向收音、系统音频权限和耳机或蓝牙切换。
-3. 候选版的真实 BP 摘要和术语提取、追问深度、中文资料整理、会议纪要、费用和延迟。
+1. 新环境的候选 ZIP 安装与 Gatekeeper 流程、麦克风拒绝后重新授权，以及实际 PDF 界面上传。
+2. 真人中英文混语准确性、更换模型后的术语提示效果、尾句缺失定位与字幕延迟。腾讯会议双向收音、系统音频权限和耳机或蓝牙切换。
+3. 真人 VC 会议中的高价值追问、中文资料整理、会议纪要、费用和延迟。
 4. 持续 60 分钟的真实会议，记录转写延迟和资源变化、网络及设备中断后的表现。
 5. 两台独立设备的远程协作。本机默认只监听 127.0.0.1，异地验收需另部署 HTTPS 共享服务。
 
