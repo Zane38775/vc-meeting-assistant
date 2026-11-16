@@ -1,6 +1,6 @@
 # 在 Apple Silicon Mac 验证与继续开发
 
-本页面向源码开发者。公开下载仍为 v0.1.0，已内置运行时和语音模型，可按安装说明运行。当前源码版本 `0.1.2-beta.1` 是尚未发布的本地候选版。GitHub 自动生成的 `Source code.zip` 用于源码开发。[v0.1.0 Release](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0) · [Mac ZIP](https://github.com/Zane38775/vc-meeting-assistant/releases/download/v0.1.0/VC-Meeting-Assistant-0.1.0-mac-arm64.zip) · [安装说明](START-MAC.md)
+本页面向源码开发者。公开下载仍为 v0.1.0，已内置运行时和语音模型，可按安装说明运行。当前源码版本 `0.1.2-beta.2` 是尚未发布的本地候选版。GitHub 自动生成的 `Source code.zip` 用于源码开发。[v0.1.0 Release](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0) · [Mac ZIP](https://github.com/Zane38775/vc-meeting-assistant/releases/download/v0.1.0/VC-Meeting-Assistant-0.1.0-mac-arm64.zip) · [安装说明](START-MAC.md)
 
 v0.1.0 在 Mac 上遇到 Finder 扩展属性导致的签名失败，采用修订脚本后完成本机签名、启动和真人线下收音。现场发现英文转写、追问质量和材料上传问题。候选源码已成功解析原约 35.2 MB PPTX 的 50 页，摘要曾因 DeepSeek 返回条数超过本地限制而未显示。修订后的摘要已通过实际接口复验；候选安装包的真人复验、腾讯会议双向和长会仍待验收。[验证记录](../VALIDATION.md) · [Mac 设备记录](MAC-DEVICE-VALIDATION-2026-11-16.md)
 

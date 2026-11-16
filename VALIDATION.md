@@ -2,7 +2,7 @@
 
 ## 版本与当前证据
 
-默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.2-beta.1` 是尚未发布的本地候选版。
+默认使用本地流式 ASR，DeepSeek 用于外部分析和公开技术检索。Mac 交付目标为 Apple Silicon arm64、macOS 14.2+。v0.1.0 是公开 Release，`0.1.2-beta.2` 是尚未发布的本地候选版。
 
 本轮 X-ASR 接入、会前研判、108 项测试、真实 DeepSeek 检查和本机文件读取问题详见 [2026-11-17 开发进度](docs/DEVELOPMENT-PROGRESS-2026-11-17.md)。下面保留之前版本的实测证据，版本和测量窗口不能混用。
 

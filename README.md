@@ -6,7 +6,7 @@
 
 **[下载 Mac 测试版 v0.1.0](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0)** · [安装说明](docs/START-MAC.md) · [Mac 开发与验收](docs/MAC-DEVELOPMENT.md) · [验证记录](VALIDATION.md)
 
-公开下载为 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本。GitHub 的 `Source code (zip)` 用于源码开发。当前源码版本为 `0.1.2-beta.1`，是尚未发布的本地候选版。两版均为测试构建，尚未做 Apple Developer ID 签名或公证。
+公开下载为 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本。GitHub 的 `Source code (zip)` 用于源码开发。当前源码版本为 `0.1.2-beta.2`，是尚未发布的本地候选版。两版均为测试构建，尚未做 Apple Developer ID 签名或公证。
 
 ![会议工作台演示截图](docs/assets/meeting-demo.png)
 

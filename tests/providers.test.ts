@@ -6,6 +6,7 @@ import {zipSync,strToU8} from 'fflate';
 import {signTencentURL,mapTencentMessage,createTencentASR} from '../server/providers/tencent';
 import {analyzeContext,decodeSSE,DeepSeekClient,prepareProject,sanitizePublicQuery,validateQuestionDrafts,summarizeMeeting} from '../server/providers/deepseek';
 import {parseMaterial} from '../server/materials';
+import {validatePreparation} from '../server/project-preparation';
 
 test('Tencent signer signs raw sorted V2 parameters, encodes signature, and never puts secret key on wire',()=>{
  const url=new URL(signTencentURL({appId:'12345',secretId:'sid',secretKey:'topsecret',engine:'16k_zh_en_speaker_2.0'}, {timestamp:100,nonce:42,voiceId:'voice-test'}));
@@ -119,6 +120,44 @@ test('project preparation validates quotations for the exact file and page and r
  });
  assert.deepEqual(prepared.hypotheses,{businessModel:modelResponse.hypotheses.businessModel});
  assert.deepEqual(prepared.questions,[question,...validQuestions.slice(0,4)]);
+});
+
+test('project preparation recovers continuous whitespace differences while preserving the exact source text',()=>{
+ const original='Acme Labs\r\n\tAnnual Brief';
+ const source={materialId:'deck',page:1,quote:'Acme Labs Annual Brief'};
+ const exact='Managed Support';
+ const input={projectName:'示例项目',materials:[{id:'deck',name:'bp.txt',pages:[{
+  page:1,text:`${original}\nManaged\nSupport\n${exact}`,
+ }]}],totalPages:1,excerpted:false};
+ const data={overview:{
+  company:{statement:'公司为 Acme Labs。',source},
+  product:{statement:'产品为 Managed Support。',source:{...source,quote:exact}},
+ },hypotheses:{},questions:[]};
+
+ const preparation=validatePreparation(data,input);
+ assert.equal(preparation.overview.company?.source.quote,original);
+ assert.equal(preparation.overview.product?.source.quote,exact);
+});
+
+test('project preparation whitespace recovery still requires the same page, words, punctuation and figures',()=>{
+ const source={materialId:'deck',page:1,quote:'Annual Plans'};
+ const input={projectName:'示例项目',materials:[{id:'deck',name:'bp.txt',pages:[
+  {page:1,text:`Annual Plans\nSuperSmart\nGrid\nSmart\nGridX\nAPI:\tProduct\nAcme\tLabs\nARR\n10 million\nLong${' '.repeat(140)}quote`},
+  {page:2,text:'Remote\nSupport\nARR 20 million'},
+ ]}],totalPages:2,excerpted:false};
+ const claim=(quote:string,statement='材料提及一项产品。')=>({statement,source:{...source,quote}});
+ const data={overview:{
+  company:claim('Annual Plans'),
+  product:claim('Remote Support'),
+  customers:claim('Smart Grid'),
+  problem:claim('API Product'),
+  technicalApproach:claim('acme Labs'),
+  businessModel:claim('AcmeLinks Labs'),
+  keyMetrics:claim('ARR 10 million','年收入 20 million。'),
+  financing:claim('Long quote'),
+ },hypotheses:{},questions:[]};
+
+ assert.deepEqual(validatePreparation(data,input).overview,{company:data.overview.company});
 });
 
 test('project preparation makes one shorter retry for invalid JSON and leaves HTTP failures alone',async t=>{
@@ -257,8 +296,10 @@ test('search sends only validated public query and returns actual HTTP citations
 test('research briefs use public search excerpts and reject unverifiable citations',async()=>{
  const {summarizeResearch}=await import('../server/providers/deepseek');
  const previousFetch=globalThis.fetch,previousKey=process.env.DEEPSEEK_API_KEY;
- const evidence=[{id:'source-a',url:'https://example.test/paper',title:'Example benchmark',snippet:'The benchmark covers English only.',query:'RAG benchmark',retrievedAt:1}];
+ const snippet='The benchmark covers English only. ... Review the timing table. ... It measures round-trip latency.';
+ const evidence=[{id:'source-a',url:'https://example.test/paper',title:'Example benchmark',snippet,query:'RAG benchmark',retrievedAt:1}];
  const finding={sourceId:'source-a',quote:'covers English only',point:'该基准只覆盖英文。',relevance:'可用于核对检索增强的英文评测。',uncertainty:'中文效果仍待核实。'};
+ const latency={...finding,quote:'measures round-trip latency',point:'基准测量往返延迟。',relevance:'可用于核对延迟口径。',uncertainty:'摘要未给出分阶段耗时。'};
  let result={findings:[finding]};
  let payload:unknown;
  globalThis.fetch=async(_url,init)=>{
@@ -269,7 +310,11 @@ test('research briefs use public search excerpts and reject unverifiable citatio
  process.env.DEEPSEEK_API_KEY='unit-test-only';
  try{
   assert.deepEqual(await summarizeResearch('RAG benchmark',evidence),[finding]);
-  assert.deepEqual(payload,{query:'RAG benchmark',sources:[{id:'source-a',title:'Example benchmark',snippet:'The benchmark covers English only.'}]});
+  assert.deepEqual(payload,{query:'RAG benchmark',sources:[{id:'source-a',title:'Example benchmark',snippet}]});
+  result={findings:[{...finding,quote:'covers English only. ... It measures round-trip latency'},finding,latency]};
+  assert.deepEqual(await summarizeResearch('RAG benchmark',evidence),[finding,latency]);
+  result={findings:[]};
+  assert.deepEqual(await summarizeResearch('RAG benchmark',evidence),[]);
   result={findings:[{...finding,sourceId:'other-source'}]};
   await assert.rejects(summarizeResearch('RAG benchmark',evidence),/引用/);
   result={findings:[{...finding,quote:'covers Chinese too'}]};

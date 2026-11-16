@@ -58,6 +58,21 @@ function boundedText(value:unknown,max:number):string|undefined {
  if(typeof value==='string'&&value.length<=max)return value.trim()||undefined;
 }
 
+function exactPageQuote(pageText:string,quote:string):string|undefined {
+ const exactIndex=pageText.indexOf(quote);
+ if(exactIndex>=0)return pageText.slice(exactIndex,exactIndex+quote.length);
+ const trimmed=quote.trim();
+ const characters=[...trimmed];
+ // Preserve token boundaries for Latin text and numbers, including compound names.
+ const wordEdge=/[\p{Script=Latin}\p{M}\p{N}_\p{Pd}]/u;
+ const before=wordEdge.test(characters[0])?'(?<!'+wordEdge.source+')':'';
+ const after=wordEdge.test(characters.at(-1)!)?'(?!'+wordEdge.source+')':'';
+ const literal=trimmed.split(/\s+/u).map(token=>token.replace(/[.*+?^$(){}|[\]\\]/g,'\\$&')).join('\\s+');
+ // Match only contiguous source text and return the page's original whitespace.
+ const matches=pageText.matchAll(new RegExp(before+'(?=('+literal+after+'))','gu'));
+ for(const [,original] of matches)if(original.length<=QUOTE_CHAR_LIMIT)return original;
+}
+
 export function hasPreparationItems(draft:PreparationDraft):boolean {
  return Object.keys(draft.overview).length>0||Object.keys(draft.hypotheses).length>0||draft.questions.length>0;
 }
@@ -73,8 +88,10 @@ export function validatePreparation(data:unknown,input:ProjectPreparationInput):
   const materialId=source?.materialId,page=source?.page,quote=source?.quote;
   if(typeof materialId!=='string'||typeof page!=='number'||!Number.isInteger(page)||typeof quote!=='string'||!boundedText(quote,QUOTE_CHAR_LIMIT))return;
   if(!/\p{L}.*\p{L}/su.test(quote))return;
-  if(!sources.get(materialId)?.pages.some(item=>item.page===page&&item.text.includes(quote)))return;
-  return {materialId,page,quote};
+  const pageText=sources.get(materialId)?.pages.find(item=>item.page===page)?.text;
+  if(pageText===undefined)return;
+  const exact=exactPageQuote(pageText,quote);
+  if(exact)return {materialId,page,quote:exact};
  };
  for(const key of PREPARATION_OVERVIEW){
   const item=record(overview[key]);
