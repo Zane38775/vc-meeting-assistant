@@ -16,7 +16,7 @@ import type {Material,Meeting,Segment} from '../shared/types';
 class Socket extends EventEmitter {
   readyState=1; bufferedAmount=0; messages:any[]=[];
   send(raw:string){this.messages.push(JSON.parse(raw));this.emit('sent',raw);}
-  close(){this.readyState=3;this.emit('close');}
+  close(code=1006){if(this.readyState===3)return;this.readyState=3;this.emit('close',code);}
 }
 function fixture(t:any, dbPath=':memory:') {
   const store=new Store(dbPath);
@@ -39,13 +39,16 @@ function fixture(t:any, dbPath=':memory:') {
 const segment=(id='sentence'):Segment=>({id,text:'最后一句完整语音',speaker:'speaker_0',startMs:0,endMs:1000,receivedAt:Date.now(),source:'asr',final:true});
 const settleMessages = () => new Promise<void>(resolve => setImmediate(resolve));
 
-async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () => void) => Promise<void> = async () => {}, holdResume?: (deliver: () => void) => void) {
+async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () => void) => Promise<void> = async () => {}, holdResume?: (deliver: () => void) => void, autoStart=true, authorize?: (signal?:AbortSignal)=>Promise<void>) {
   const code = buildSync({
     entryPoints: [fileURLToPath(new URL('../client/useMeeting.ts', import.meta.url))],
     bundle: true, write: false, format: 'cjs', external: ['react', './audio', './api'],
   }).outputFiles[0].text;
   const errors: string[] = [];
+  const commands: Record<string,any>[]=[];
   let stops = 0;
+  let resumes = 0;
+  let dispose = () => {};
   let pushAudio = () => {};
   class BrowserSocket {
     static OPEN = 1;
@@ -53,20 +56,24 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
     bufferedAmount = 0;
     onopen?: () => void;
     onmessage?: (event: {data: string}) => void;
+    onclose?: (event: {code: number}) => void;
     constructor() {
       f.socket.on('sent', (data: string) => queueMicrotask(() => this.onmessage?.({data})));
+      f.socket.on('close', (code:number) => {this.readyState=3;queueMicrotask(() => this.onclose?.({code}));});
       queueMicrotask(() => this.onopen?.());
     }
     send(raw: string) {
+      commands.push(JSON.parse(raw));
       const deliver = () => f.socket.emit('message', Buffer.from(raw));
       if (holdResume && JSON.parse(raw).type === 'resume') holdResume(deliver);
       else queueMicrotask(deliver);
     }
+    close(){f.socket.close();}
   }
   const scope = {
     module: {exports: {} as {useMeeting: typeof import('../client/useMeeting').useMeeting}},
     URL, WebSocket: BrowserSocket, window: {location: {href: 'http://localhost/meeting'}},
-    setInterval: () => 1,
+    AbortController, crypto:globalThis.crypto, setTimeout, clearTimeout, clearInterval, setInterval: () => 1,
     require(name: string) {
       switch (name) {
         case 'react':
@@ -74,15 +81,16 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
             useRef: (current: unknown) => ({current}),
             useState: (value: unknown) => [value, () => {}],
             useCallback: (fn: unknown) => fn,
-            useEffect: (effect: () => void) => effect(),
+            useEffect: (effect: () => () => void) => {dispose=effect();},
           };
         case './api':
           return {api: async () => f.store.snapshot('meeting', 'user')};
         case './audio':
-          return {captureAudio: async ({onChunk}: import('../client/audio').CaptureOptions) => {
+          return {captureAudio: async ({onChunk,signal}: import('../client/audio').CaptureOptions) => {
+            if(authorize)await authorize(signal);
             const onAudio = () => onChunk({pcm: 'AQA=', capturedAt: 1, seq: 0});
             pushAudio = onAudio;
-            return {async stop() { stops++; await stop(onAudio); }};
+            return {async stop() { stops++; await stop(onAudio); },resume(){resumes++;}};
           }};
         default:
           throw new Error(`Unexpected test dependency ${name}`);
@@ -92,10 +100,12 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
   runInNewContext(code, scope);
   const client = scope.module.exports.useMeeting('meeting', error => errors.push(error));
   await settleMessages();
-  await client.begin();
-  await settleMessages();
-  assert.equal(f.store.snapshot('meeting', 'user').meeting.status, 'live');
-  return {client, errors, get stops() { return stops; }, pushAudio: () => pushAudio()};
+  if(autoStart){
+    await client.begin();
+    await settleMessages();
+    assert.equal(f.store.snapshot('meeting', 'user').meeting.status, 'live');
+  }
+  return {client, errors, commands, dispose, get stops() { return stops; },get resumes() {return resumes;}, pushAudio: () => pushAudio()};
 }
 
 test('a rejected manual supplement leaves the real recording and ASR session active', async t => {
@@ -135,11 +145,12 @@ test('a project update during resume keeps the recorder alive until live capture
   await settleMessages();
   assert.equal(recorder.stops, 1);
   assert.equal(f.store.snapshot('meeting', 'user').meeting.status, 'paused');
-  await recorder.client.begin();
+  const starting=recorder.client.begin();
   f.hub.broadcast('meeting');
   await settleMessages();
   assert.ok(deliverResume);
   deliverResume();
+  await starting;
   await settleMessages();
   recorder.pushAudio();
   await settleMessages();
@@ -149,6 +160,116 @@ test('a project update during resume keeps the recorder alive until live capture
   await f.command('pause');
   await settleMessages();
   assert.equal(recorder.stops, 2);
+});
+
+test('capture waits past five seconds for matching ready and never submits pre-ready PCM',async t=>{
+  const f=fixture(t);
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+  const create=f.providers.createASR;
+  let ready!:()=>void;
+  f.providers.createASR=(...args)=>Object.assign(create(...args),{ready:new Promise<void>(resolve=>{ready=resolve;})});
+  const recorder=await recordingClient(f,undefined,undefined,false);
+  const starting=recorder.client.begin();
+  await settleMessages();
+  const request=recorder.commands.find(command=>command.type==='start');
+  assert.equal(typeof request?.requestId,'string');
+  await assert.rejects(f.hub.command({...f.peer,socket:new Socket() as any},{type:'start'}),/另一窗口/);
+  await assert.rejects(f.hub.command(f.peer,{type:'audio',pcm:'AQA=',seq:0,capturedAt:1}),/就绪/);
+  f.socket.send(JSON.stringify({type:'capture.ready',meetingId:'meeting',requestId:'previous'}));
+  f.socket.send(JSON.stringify({type:'capture.ready',meetingId:'another-meeting',requestId:request?.requestId}));
+  await settleMessages();
+  for(let frame=0;frame<26;frame++){t.mock.timers.tick(200);recorder.pushAudio();}
+  await settleMessages();
+  assert.equal(recorder.resumes,0);
+  assert.equal(recorder.commands.filter(command=>command.type==='audio').length,0);
+  assert.equal(f.store.snapshot('meeting','user').meeting.status,'ready');
+  assert.equal(f.sessions[0].writes.length,0);
+  ready();
+  await starting;
+  recorder.pushAudio();
+  await settleMessages();
+  assert.equal(recorder.resumes,1);
+  assert.equal(f.store.snapshot('meeting','user').meeting.status,'live');
+  assert.deepEqual(f.sessions[0].writes,[Buffer.from([1,0])]);
+});
+
+for(const reason of ['cancel','end','disconnect','switch','revoke','delete','timeout'] as const)
+test(`pending capture releases resources and ignores late ready on ${reason}`,async t=>{
+  const f=fixture(t);
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+  const create=f.providers.createASR;
+  let ready!:()=>void;
+  f.providers.createASR=(...args)=>Object.assign(create(...args),{ready:new Promise<void>(resolve=>{ready=resolve;})});
+  const recorder=await recordingClient(f,undefined,undefined,false);
+  const starting=reason==='timeout'?assert.rejects(recorder.client.begin(),/语音模型加载超时/):recorder.client.begin();
+  await settleMessages();
+  assert.equal(f.sessions.length,1);
+  if(reason==='cancel'||reason==='end')await recorder.client.control(reason==='cancel'?'pause':'stop');
+  else if(reason==='disconnect')f.socket.close();
+  else if(reason==='switch')recorder.dispose();
+  else if(reason==='revoke'){
+    f.store.delete('member','project:user');
+    f.hub.revoke('project','user');
+  }else if(reason==='delete'){
+    f.hub.revoke('project');
+    f.hub.dispose('meeting');
+    f.store.deleteScope('meeting');
+    f.store.deleteScope('project');
+  }else t.mock.timers.tick(24_000);
+  await starting;
+  assert.equal(f.sessions[0].closed,true);
+  ready();
+  await settleMessages();
+  assert.equal(recorder.resumes,0);
+  assert.equal(recorder.stops,1);
+  assert.ok(!f.socket.messages.some(message=>message.type==='capture.ready'));
+  assert.equal(f.store.get<Meeting>('meeting','meeting')?.status,reason==='delete'?undefined:reason==='end'?'ended':'ready');
+  assert.equal(f.store.list('segment','meeting').length,0);
+  if(reason==='cancel'){
+    f.providers.createASR=create;
+    await recorder.client.begin();
+    assert.equal(f.store.get<Meeting>('meeting','meeting')?.status,'live');
+  }
+});
+
+test('permission denial and cancellation leave the meeting waiting to start',async t=>{
+  const f=fixture(t);
+  let requests=0;
+  const recorder=await recordingClient(f,undefined,undefined,false,signal=>{
+    if(++requests===1)return Promise.reject(new Error('麦克风授权未获准'));
+    if(requests===2)return new Promise<void>((_,reject)=>signal?.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+    return Promise.resolve();
+  });
+  await assert.rejects(recorder.client.begin(),/麦克风授权未获准/);
+  const starting=recorder.client.begin();
+  await recorder.client.control('pause');
+  await starting;
+  assert.deepEqual(recorder.commands,[]);
+  assert.equal(f.sessions.length,0);
+  assert.equal(f.store.get<Meeting>('meeting','meeting')?.status,'ready');
+  await recorder.client.begin();
+  assert.equal(f.store.get<Meeting>('meeting','meeting')?.status,'live');
+});
+
+test('failed startup closes capture and allows retry without reporting lost audio',async t=>{
+  const f=fixture(t);
+  const create=f.providers.createASR;
+  let rejectReady!:(error:Error)=>void;
+  f.providers.createASR=(...args)=>Object.assign(create(...args),{ready:new Promise<void>((_,reject)=>{rejectReady=reject;})});
+  const recorder=await recordingClient(f,undefined,undefined,false);
+  const first=assert.rejects(recorder.client.begin(),/模型加载失败/);
+  await settleMessages();
+  await assert.rejects(recorder.client.begin(),/仍在进行/);
+  rejectReady(new Error('模型加载失败'));
+  await first;
+  assert.equal(f.sessions[0].closed,true);
+  assert.equal(recorder.stops,1);
+  assert.equal(f.store.snapshot('meeting','user').meeting.status,'ready');
+  assert.equal(f.store.snapshot('meeting','user').segments.length,0);
+  f.providers.createASR=create;
+  await recorder.client.begin();
+  assert.equal(recorder.resumes,1);
+  assert.equal(f.store.snapshot('meeting','user').meeting.status,'live');
 });
 
 test('a rejected audio frame stops recording and leaves a gap', async t => {

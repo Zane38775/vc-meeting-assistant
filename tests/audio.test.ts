@@ -61,7 +61,7 @@ test('source meters use actual source samples and stereo is reduced to mono', ()
   assert.equal(mixAndMeasure(mic, [], 2).system, 0);
 });
 
-function workletHarness() {
+function workletHarness(startPaused=false) {
   const messages: any[] = [];
   let Processor: any;
   const code = buildSync({entryPoints:[fileURLToPath(new URL('../client/pcm-worklet.js', import.meta.url))], bundle:true, write:false, format:'iife'}).outputFiles[0].text;
@@ -69,9 +69,20 @@ function workletHarness() {
     port = {onmessage: null as any, postMessage(message: any) {messages.push(message);}};
   }, registerProcessor(_name: string, implementation: any) { Processor = implementation; }};
   runInNewContext(code, scope);
-  const processor = new Processor();
+  const processor = new Processor({processorOptions:{startPaused}});
   return {messages, processor, render(count:number) {for(let i=0;i<count;i++) {scope.currentTime += 128/48000; processor.process([[new Float32Array(128).fill(0.5)],[]], [[new Float32Array(128)]]);}}};
 }
+
+test('a worklet created pending ASR readiness never buffers pre-start samples', () => {
+  const {processor,messages,render}=workletHarness(true);
+  render(100);
+  assert.equal(messages.length,0);
+  processor.port.onmessage({data:{type:'resume'}});
+  render(74);
+  assert.equal(messages.filter(message=>message.type==='frame').length,0);
+  render(1);
+  assert.equal(messages.filter(message=>message.type==='frame').length,1);
+});
 
 test('worklet flushes final speech on stop and emits no more audio afterwards', () => {
   const {processor, messages, render} = workletHarness();
@@ -170,6 +181,23 @@ test('microphone permission resolving after display rejection is released immedi
   assert.equal(mic.track.readyState,'ended');
 });
 
+test('cancel during the permission prompt stops late-granted tracks and releases capture', async () => {
+  let grant!: (stream: unknown) => void;
+  const mic=fakeStream();
+  let attempts=0;
+  const capture=await captureHarness({getUserMedia:()=>{
+    if(++attempts===1)return new Promise(resolve=>{grant=resolve;});
+    return Promise.reject(new Error('second attempt reached microphone permission'));
+  }});
+  const controller=new AbortController();
+  const pending=capture({mode:'offline',signal:controller.signal,...captureCallbacks});
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(pending,/cancelled/);
+  await assert.rejects(capture({mode:'offline',...captureCallbacks}),/second attempt reached microphone permission/);
+  grant(mic);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(mic.track.readyState,'ended');
+});
 async function activeCapture() {
   const mic = fakeStream();
   const frames: string[] = [];

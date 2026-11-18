@@ -6,7 +6,7 @@
 
 **[下载 Mac 测试版 v0.1.0](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0)** · [安装说明](docs/START-MAC.md) · [Mac 开发与验收](docs/MAC-DEVELOPMENT.md) · [验证记录](VALIDATION.md)
 
-公开下载为 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本。GitHub 的 `Source code (zip)` 用于源码开发。当前源码版本为 `0.1.2-beta.2`，是尚未发布的本地候选版。两版均为测试构建，尚未做 Apple Developer ID 签名或公证。
+公开下载为 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本。GitHub 的 `Source code (zip)` 用于源码开发。当前源码版本为 `0.1.2-beta.3`，是尚未发布的本地候选版。两版均为测试构建，尚未做 Apple Developer ID 签名或公证。
 
 ![会议工作台演示截图](docs/assets/meeting-demo.png)
 
@@ -25,6 +25,8 @@
 
 ## 本地候选版改动
 
+- 原生语音引擎在独立子进程运行，初始化取消或引擎崩溃不再与会议服务共享进程。开始/恢复时等待本次模型就绪后才发送音频；授权和加载阶段可取消。该路径已通过故障回归，真人闪退复验仍待完成。
+
 - 默认改用本地 X-ASR 480 ms 流式模型，保留 Zipformer Small 显式回退。短样例英文有所改善，但 `ACE-Step` 等专名仍有误识，新模型真人效果尚未验收。[模型对比](docs/ASR-MODEL-EVALUATION-2026-11-17.md)
 - 会前研判按项目汇总公司、产品、客户、技术路线、商业模式、关键指标和融资需求，分别展示资料页引文、AI 假设、证据缺口及最多五个优先追问。研判参与会中分析，资料修改后需重新生成；资料或研判在生成问题期间改变时，旧草案不会发布。
 
@@ -35,7 +37,7 @@
 
 ## 已验证与未验证
 
-- **当前阻断**：0.1.2-beta.2 真人收音开始约 5.2 秒后闪退，已复现原生引擎初始化取消导致服务退出的路径，修复进行中。新模型真人与尾句验收尚未通过。[闪退记录](docs/ASR-STARTUP-INCIDENT-2026-11-18.md)
+- **当前验收阻断**：0.1.2-beta.2 真人收音开始约 5.2 秒后闪退。0.1.2-beta.3 已加入进程隔离和就绪握手，本机 124 项测试通过、零跳过；真人中英文与暂停/结束尾句仍未验收通过。[闪退记录](docs/ASR-STARTUP-INCIDENT-2026-11-18.md)
 
 - v0.1.0 在 Apple Silicon Mac 上完成修订脚本安装、本机签名、启动、真人线下收音和真实 DeepSeek 追问与检索。测试暴露了英文错词、重复浅显的追问、PDF 解析错误和大 PPTX 上传上限。
 - Mac 上的阶段性自动测试和生产构建已通过。真实 Electron 服务中合成 PDF 已解析并通过原件字节比对。源码界面重新上传原约 35.2 MB PPTX 后成功解析 50 页，摘要曾因 DeepSeek 返回条数超过本地限制而未显示。修订后实际接口已生成摘要和有原文依据的术语，0.1.1 候选界面已提取摘要和术语，但真人复验仍把 `home party` 识别成「红 PARTY」，将 `ACE-Step` 识别成「A STEP」，并有一句尾句缺失、原因未确认。
@@ -79,4 +81,4 @@ python3 scripts/archive-mac.py
 
 ## 技术与模型
 
-Electron、React/TypeScript、Fastify、SQLite、AudioWorklet、WebSocket。ASR 默认采用 sherpa-onnx 的 X-ASR 480 ms（中文/英文），保留 Zipformer Small，独立 Worker，CPU 两线程。推理/资料分析/检索使用 DeepSeek 独立接口。模型与运行库授权、来源、校验值在随包的模型资源中。
+Electron、React/TypeScript、Fastify、SQLite、AudioWorklet、WebSocket。ASR 默认采用 sherpa-onnx 的 X-ASR 480 ms（中文/英文），保留 Zipformer Small，独立子进程、CPU 两线程。推理/资料分析/检索使用 DeepSeek 独立接口。模型与运行库授权、来源、校验值在随包的模型资源中。

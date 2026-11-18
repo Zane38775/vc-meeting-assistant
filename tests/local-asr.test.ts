@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {fileURLToPath} from 'node:url';
 import {existsSync,readFileSync,mkdirSync,mkdtempSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createLocalASR,localASRAvailable,LOCAL_MODEL_FILES} from '../server/providers/local';
+import {createLocalASR,forkLocalASRProcess,localASRAvailable,LOCAL_MODEL_FILES} from '../server/providers/local';
 import {getCapabilities,createASR} from '../server/providers/index';
 
 class FakeWorker extends EventEmitter {sent:any[]=[];terminated=false;postMessage(value:any){this.sent.push(value);}terminate(){this.terminated=true;this.emit('exit',1);return Promise.resolve(1);}}
@@ -61,7 +64,7 @@ test('model installer rejects truncated and altered cached files before use',asy
 test('local ASR bounds unacknowledged audio and flushes queued frames before finish',async()=>{
  const dir=files(),worker=new FakeWorker(),errors:Error[]=[];const segments:any[]=[];
  const session=createLocalASR({onSegment:s=>segments.push(s),onStatus:()=>{},onError:e=>errors.push(e)},{modelDir:dir,workerFactory:()=>worker});
- try{session.write(Buffer.alloc(6400));assert.equal(worker.sent.length,0);const finished=session.finish();worker.emit('message',{type:'ready'});assert.equal(worker.sent[0].type,'audio');assert.equal(worker.sent[1].type,'finish');worker.emit('message',{type:'segment',segment:{index:0,text:'尾音',final:true,startMs:0,endMs:200}});worker.emit('message',{type:'done'});await finished;assert.equal(segments[0].final,true);assert.match(segments[0].speaker,/未分离/);assert.equal(worker.terminated,true);assert.deepEqual(errors,[]);}finally{session.close();rmSync(dir,{recursive:true,force:true});}
+ try{session.write(Buffer.alloc(6400));assert.equal(worker.sent.length,0);const finished=session.finish();worker.emit('message',{type:'ready'});assert.equal(worker.sent[0].type,'audio');assert.equal(worker.sent[1].type,'finish');worker.emit('message',{type:'segment',segment:{index:0,text:'尾音',final:true,startMs:0,endMs:200}});worker.emit('message',{type:'done'});await finished;assert.equal(segments[0].final,true);assert.match(segments[0].speaker,/未分离/);assert.equal(worker.terminated,false);worker.emit('exit',0);assert.deepEqual(errors,[]);}finally{session.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('local ASR reports overload once and rejects pending finish on cancel',async()=>{
  const dir=files(),worker=new FakeWorker(),errors:Error[]=[];
@@ -73,14 +76,55 @@ test('local ASR reports overload once and rejects pending finish on cancel',asyn
 test('local ASR startup deadline releases workers',async()=>{
  const dir=files(),worker=new FakeWorker();let resolve!:(e:Error)=>void;const error=new Promise<Error>(r=>resolve=r);
  const session=createLocalASR({onSegment:()=>{},onStatus:()=>{},onError:resolve},{modelDir:dir,workerFactory:()=>worker,startupMs:20});
- try{assert.match((await error).message,/启动超时/);assert.equal(worker.terminated,true);}finally{session.close();rmSync(dir,{recursive:true,force:true});}
+ try{assert.match((await error).message,/启动超时/);await assert.rejects(session.ready!,/启动超时/);assert.equal(worker.terminated,true);}finally{session.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('local ASR processing deadline terminates a stalled decoder with unacknowledged audio',async()=>{
  const dir=files(),worker=new FakeWorker();let resolve!:(e:Error)=>void;const error=new Promise<Error>(r=>resolve=r);
  const session=createLocalASR({onSegment:()=>{},onStatus:()=>{},onError:resolve},{modelDir:dir,workerFactory:()=>worker,processingMs:20});
  try{worker.emit('message',{type:'ready'});session.write(Buffer.alloc(6400));assert.match((await error).message,/处理超时/);assert.equal(worker.terminated,true);}finally{session.close();rmSync(dir,{recursive:true,force:true});}
 });
-test('local worker transcribes bundled real bilingual WAV off-thread with partials and final tail', {skip:!existsSync('models/local-asr/test_wavs/0.wav')},async()=>{
+test('native abort and configuration secrets are contained within the ASR child process',async()=>{
+ const dir=files();
+ const keys=['DEEPSEEK_API_KEY','TENCENT_SECRET_KEY','DOTENV_CONFIG_PATH','NODE_OPTIONS'];
+ const saved=keys.map(key=>process.env[key]);
+ const errors:Error[]=[];
+ let reportError!:(error:Error)=>void;
+ const crashed=new Promise<Error>(resolve=>{reportError=resolve;});
+ let session:ReturnType<typeof createLocalASR>|undefined;
+ const fixture=new URL('./fixtures/aborting-asr.cjs',import.meta.url);
+ const workerFactory=(_url:URL,data:Parameters<typeof forkLocalASRProcess>[1])=>forkLocalASRProcess(fixture,data);
+ try{
+  keys.forEach(key=>{process.env[key]='test-only-secret';});
+  try{
+   session=createLocalASR({...silentCallbacks,onError:error=>{errors.push(error);reportError(error);}},{
+    modelDir:dir,profile:'zipformer-small',workerFactory,
+   });
+  }finally{
+   keys.forEach((key,index)=>{if(saved[index]===undefined)delete process.env[key];else process.env[key]=saved[index];});
+  }
+  await session.ready;
+  session.write(Buffer.alloc(6400));
+  const error=await crashed;
+  const exit=process.platform==='win32'?/本地转写子进程意外退出（-?[1-9][0-9]*）/:/本地转写子进程意外退出（SIGABRT）/;
+  assert.match(error.message,exit);
+  await assert.rejects(session.finish(),{message:error.message});
+  assert.deepEqual(errors,[error]);
+
+  const replacement=createLocalASR(silentCallbacks,{modelDir:dir,profile:'zipformer-small',workerFactory});
+  try{
+   await replacement.ready;
+   await replacement.finish();
+  }finally{replacement.close();}
+ }finally{session?.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('closing during actual X-ASR startup leaves the caller alive and able to open another session',{
+ skip:!existsSync('models/local-asr/xasr-480/encoder.int8.onnx'),
+},async()=>{
+ const fixture=fileURLToPath(new URL('./fixtures/cancel-asr-and-reopen.mjs',import.meta.url));
+ const {stdout}=await promisify(execFile)(process.execPath,['--import','tsx/esm',fixture],{timeout:30000});
+ assert.match(stdout,/reopened after startup cancellation/);
+});
+test('local ASR child transcribes bundled real bilingual WAV with partials and final tail', {skip:!existsSync('models/local-asr/test_wavs/0.wav')},async()=>{
  const wav=readFileSync('models/local-asr/test_wavs/0.wav');let at=12,pcm:Buffer|undefined;
  while(at+8<=wav.length){const size=wav.readUInt32LE(at+4);if(wav.toString('ascii',at,at+4)==='data'){pcm=wav.subarray(at+8,at+8+size);break;}at+=8+size+(size%2);}
  assert.ok(pcm);const segments:any[]=[];const errors:Error[]=[];let ready!:()=>void;const started=new Promise<void>(r=>ready=r);
