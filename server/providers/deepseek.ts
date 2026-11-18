@@ -93,17 +93,38 @@ export function validateQuestionDrafts(data:any,input:AnalysisInput):{questions:
   return {text:q.text.trim(),reason:q.reason.trim(),quote:q.quote,segmentIds:material?ids:freshIds,focus,...(material?{materialId:material.id,materialPage:q.materialPage}:{}),...(researchQuery?{researchQuery}:{})};
  })};
 }
+function recentHistory<T>(items:T[],maxItems:number):T[] {
+ // Bound the serialized payload, including escaped quotes/newlines and object metadata.
+ const selected:T[]=[];let size=2;
+ for(let i=items.length-1;i>=0&&selected.length<maxItems;i--){
+  const serializedSize=JSON.stringify(items[i]).length;
+  if(serializedSize+2>24000)continue;
+  const cost=serializedSize+(selected.length?1:0);
+  if(size+cost>24000)break;
+  selected.push(items[i]);size+=cost;
+ }
+ return selected.reverse();
+}
 function context(input:AnalysisInput) {
- // Coaching uses recent context; full meeting summaries use complete batches below.
+ // Keep the recent citation window; older verbatim context helps avoid asking answered questions.
  let remaining=40000;
  const materials=input.materials.slice(0,10).map(m=>({...m,pages:m.pages.slice(0,100).map(p=>{const text=p.text.slice(0,Math.min(1200,remaining));remaining-=text.length;return {...p,text};}).filter(p=>p.text||p.warning),summary:m.summary.slice(0,3000)}));
- const finals=input.segments.filter(s=>s.final&&!s.gap);
+ const finals=input.segments.filter(s=>s.final&&!s.gap).sort((a,b)=>a.startMs-b.startMs||a.endMs-b.endMs);
  const newIds=new Set(input.newSegmentIds);
  const newSegments=finals.filter(s=>newIds.has(s.id)).slice(-40);
  const olderSlots=40-newSegments.length;
  const olderSegments=olderSlots?finals.filter(s=>!newIds.has(s.id)).slice(-olderSlots):[];
  const selected=new Set([...olderSegments,...newSegments].map(s=>s.id));
  const segments=finals.filter(s=>selected.has(s.id)).map(s=>({...s,text:s.text.slice(0,4000)}));
+ const olderDiscussion=finals.filter(s=>!selected.has(s.id)&&!newIds.has(s.id));
+ const earlierDiscussion=recentHistory(olderDiscussion.map(({id,speaker,startMs,endMs,text})=>({id,speaker,startMs,endMs,text})),200);
+ const priorQuestions=input.questions.slice(0,-30);
+ const earlierQuestions=recentHistory(priorQuestions.map(({id,text,status})=>({id,text,status})),120);
+ const contextCoverage={
+  omittedEarlierSegments:olderDiscussion.length-earlierDiscussion.length,
+  omittedEarlierQuestions:priorQuestions.length-earlierQuestions.length,
+  omittedNewSegments:finals.filter(s=>newIds.has(s.id)&&!selected.has(s.id)).length,
+ };
  const {researchBriefs,evidence,...meeting}=input;
  const sources=new Map((evidence??[]).map(source=>[source.id,source]));
  const researchContext:{query:string;findings:(Omit<ResearchFinding,'sourceId'>&{source:Pick<Evidence,'id'|'title'|'url'>})[]}[]=[];
@@ -127,6 +148,7 @@ function context(input:AnalysisInput) {
   if(researchContext.length===5)break;
  }
  return {...meeting,projectName:input.projectName.slice(0,200),segments,questions:input.questions.slice(-30),materials,
+  earlierDiscussion,earlierQuestions,contextCoverage,
   ...(researchContext.length?{researchContext}:{}),
   ...(input.newSegmentIds?{newSegmentIds:newSegments.map(s=>s.id)}:{})};
 }
@@ -136,6 +158,7 @@ export async function analyzeContext(input:AnalysisInput,signal?:AbortSignal):Pr
 先从 newSegmentIds 对应的新增定稿里理解发生了什么变化，再结合项目材料、此前的问答及最新回答判断是否存在会改变投资判断的缺口。只输出一个此刻最值得问的问题，或输出 {"questions":[]}。问题应能区分不同解释、检验关键假设或索取具体证据；就语境选择最相关的关注点，避免机械检查清单。focus 字段选一个：customer_evidence（客户行为、试点、留存或付费证据）、commercial_model（收入与增长假设）、unit_economics（毛利、获客或交付成本）、technical_moat（基线、复现、替代或技术壁垒）、risk（关键经营与技术风险）、next_validation（下一步验证）、clarification（影响判断的关键澄清）。
 先检查新增发言本身是否提出新的项目事实、补充证据、修正旧说法或暴露影响判断的不确定性。寒暄、告别和关于这场会议的操作或设备状态属于会务对话，不构成新证据。若本轮只有这些内容，或只重复已知情况，输出 {"questions":[]}。只有明确在讨论项目功能或实测时，相关技术内容才可作为证据。
 查看已有问题及发言是否已回答。同一证据和议题禁止改写重提；只有新增证据改变判断时才向前推进。对明显误听、含糊、句子残缺或未确认的细节保留不确定性；仅当澄清会改变判断时才问，并直接确认那个影响判断的分歧，避免反复请人解释单个词。reason 用一句话说明为什么此刻要问及答案会影响哪项判断。把对方陈述和推断保留为待验证信息。
+earlierDiscussion 是较早的定稿原文，earlierQuestions 是较早问题的原文和当前状态。先结合这些历史核对已经回答的问题、已提供的证据与后来的修正；标为已回答或已忽略的事项不要换措辞重提，除非本轮新证据带来实质变化。历史不是独立核实的事实，也不能作为本轮新增来源；不要从中直接挑 quote 或 segmentIds。contextCoverage 标明预算之外未包含的段落和问题数，存在遗漏时，输入没出现某个答案不等于会上没回答，不能据此断言对方没说明。仅依据当前真正提供的信息判断。
 preparation 是会前研判，overview 为带引文的公司陈述，hypotheses 为待验证假设，questions 为可能的核查方向。结合本轮发言判断哪些假设仍缺证据；已经回答的会前问题不要重复提出。会前研判本身不能作为新发言或独立事实。输出 quote 必须逐字存在于本次 segments 或 materials.pages.text 中，不能直接沿用只出现在 preparation 中的引文，因为本轮材料可能仅提供节选。
 quote 要逐字引用一段足以支撑问题的输入。发言引文必须来自本轮新增定稿，segmentIds 包含该新增定稿的真实 ID。引用材料时提供 materialPage，页码和引文组合须唯一，并用 segmentIds 指明哪条本轮发言引出了材料上的缺口。没有新增依据或值得打断的问题就输出空数组。
 提交前检查：删去本轮新增发言后，如果仍可根据旧讨论或材料原样提出同一个问题，就输出空数组。不要选一条刚出现却与问题无关的引文来重问旧话题。

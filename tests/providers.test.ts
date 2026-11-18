@@ -78,6 +78,89 @@ test('coaching request keeps revised and recent final text plus previously dismi
  assert.equal(mockFetch.mock.callCount(),1);
 });
 
+test('coaching remembers earlier answers and resolved questions beyond the recent window without making them fresh evidence',async t=>{
+ const previousKey=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previousKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previousKey;});
+ const segments=Array.from({length:85},(_,i)=>({id:`s${i}`,text:i===0?'已核对：三家试点都尚未付费，先前说成付费需要更正。':`讨论事项 ${i}`,final:true,source:'asr' as const,speaker:'创业者',startMs:i*1000,endMs:(i+1)*1000,receivedAt:i}));
+ const questions=Array.from({length:35},(_,i)=>({id:`q${i}`,text:i===0?'三家试点是否已付费？':`先前问题 ${i}`,quote:'三家试点',reason:'核实客户证据',segmentIds:['s0'],status:i===0?'answered' as const:'dismissed' as const,kind:'inference' as const,createdAt:i,evidenceIds:[]}));
+ let staleQuote=false,payload:any;
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  payload=JSON.parse(JSON.parse(init!.body as string).messages[1].content);
+  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({questions:staleQuote?[{text:'试点是否付费？',reason:'核实收入',quote:segments[0].text,segmentIds:['s0'],focus:'customer_evidence'}]:[]})}}]});
+ });
+ const input={projectName:'Fixture',segments,questions,materials:[],newSegmentIds:['s84']};
+ assert.deepEqual(await analyzeContext(input),{questions:[]});
+  assert.deepEqual(payload.earlierDiscussion[0],{id:'s0',speaker:'创业者',startMs:0,endMs:1000,text:segments[0].text});
+  assert.equal(payload.earlierDiscussion.length,45);
+  assert.equal(payload.earlierQuestions[0].text,questions[0].text);
+  assert.equal(payload.earlierQuestions[0].status,'answered');
+  assert.equal(payload.earlierQuestions.length,5);
+  assert.equal(payload.contextCoverage.omittedEarlierSegments,0);
+  assert.equal(payload.contextCoverage.omittedEarlierQuestions,0);
+  assert.deepEqual(payload.newSegmentIds,['s84']);
+  assert.equal(payload.segments.length,40);
+  assert.equal(payload.segments.some((s:any)=>s.id==='s0'),false);
+ staleQuote=true;
+ await assert.rejects(analyzeContext(input),/来源/);
+});
+
+test('earlier coaching context is bounded, excludes gaps and partials, and reports omitted history',async t=>{
+ const previousKey=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previousKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previousKey;});
+ const segments=Array.from({length:400},(_,i)=>({id:`s${i}`,text:`发言 ${i}：${'客户称："试点记录"\\原文\n仍待核实。'.repeat(20)}`,final:true,source:'asr' as const,speaker:'创业者',startMs:i,endMs:i+1,receivedAt:i}));
+ let payload:any;
+ const questions=Array.from({length:240},(_,i)=>({id:`q${i}`,text:`问题 ${i}：${'需要核实哪些客户证据？'.repeat(15)}`,quote:'',reason:'',segmentIds:[],status:'dismissed' as const,kind:'inference' as const,createdAt:i,evidenceIds:[]}));
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  payload=JSON.parse(JSON.parse(init!.body as string).messages[1].content);
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'{"questions":[]}'}}]});
+ });
+ await analyzeContext({projectName:'Fixture',segments:[{...segments[0],id:'gap',gap:true},{...segments[0],id:'partial',final:false},...segments].reverse(),questions,materials:[],newSegmentIds:['s399']});
+  assert.ok(payload.earlierDiscussion.length>0&&payload.earlierDiscussion.length<=200);
+  assert.ok(JSON.stringify(payload.earlierDiscussion).length<=24000);
+  assert.ok(JSON.stringify(payload.earlierQuestions).length<=24000);
+  assert.ok(payload.earlierQuestions.length<=120);
+  assert.equal(payload.contextCoverage.omittedEarlierSegments,360-payload.earlierDiscussion.length);
+  assert.equal(payload.contextCoverage.omittedEarlierQuestions,210-payload.earlierQuestions.length);
+  assert.equal(payload.earlierDiscussion.at(-1).id,'s359');
+  assert.ok(payload.earlierDiscussion.every((s:any)=>!['gap','partial'].includes(s.id)&&segments.some(original=>original.id===s.id&&original.text===s.text)));
+  assert.deepEqual(payload.earlierDiscussion.map((s:any)=>s.startMs),payload.earlierDiscussion.map((s:any)=>s.startMs).sort((a:number,b:number)=>a-b));
+
+});
+
+test('overflowing fresh segments are reported as omitted rather than relabeled as earlier conversation',async t=>{
+ const previousKey=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previousKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previousKey;});
+ const segments=Array.from({length:50},(_,i)=>({id:`s${i}`,text:`新增发言 ${i}`,final:true,source:'asr' as const,speaker:'创业者',startMs:i,endMs:i+1,receivedAt:i}));
+ let payload:any;
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  payload=JSON.parse(JSON.parse(init!.body as string).messages[1].content);
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'{"questions":[]}'}}]});
+ });
+ await analyzeContext({projectName:'Fixture',segments,questions:[],materials:[],newSegmentIds:segments.map(s=>s.id)});
+ assert.deepEqual(payload.earlierDiscussion,[]);
+ assert.deepEqual(payload.contextCoverage,{omittedEarlierSegments:0,omittedEarlierQuestions:0,omittedNewSegments:10});
+ assert.deepEqual(payload.newSegmentIds,segments.slice(10).map(s=>s.id));
+});
+
+test('one oversized earlier record cannot hide other usable answers from coaching',async t=>{
+ const previousKey=process.env.DEEPSEEK_API_KEY;
+ process.env.DEEPSEEK_API_KEY='unit-test-only';
+ t.after(()=>{if(previousKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previousKey;});
+ const segments=Array.from({length:42},(_,i)=>({id:`s${i}`,text:i===1?'\u0000'.repeat(5000):`客户尚未付费 ${i}`,final:true,source:'manual' as const,speaker:'创业者',startMs:i,endMs:i+1,receivedAt:i}));
+ let payload:any;
+ t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init?:RequestInit)=>{
+  payload=JSON.parse(JSON.parse(init!.body as string).messages[1].content);
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'{"questions":[]}'}}]});
+ });
+ await analyzeContext({projectName:'Fixture',segments,questions:[],materials:[],newSegmentIds:['s41']});
+ assert.deepEqual(payload.earlierDiscussion.map((s:any)=>s.id),['s0']);
+ assert.equal(payload.earlierDiscussion[0].text,segments[0].text);
+ assert.equal(payload.contextCoverage.omittedEarlierSegments,1);
+});
+
 test('project preparation validates quotations for the exact file and page and rejects unsupported company figures',async t=>{
  const previous=process.env.DEEPSEEK_API_KEY;
  process.env.DEEPSEEK_API_KEY='unit-test-only';

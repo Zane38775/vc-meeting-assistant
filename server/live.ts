@@ -339,39 +339,47 @@ export class LiveHub {
  async research(mid:string,q:Question,query:string){
   if(!this.alive(mid))return;
   const r=this.runtime(mid);
-  const priorSources=this.store.list<Evidence>('evidence',mid).filter(source=>source.query===query);
-  if(priorSources.length){
-   this.linkResearchEvidence(mid,[q.id],priorSources);
+  const briefKey=`${mid}:${query}`;
+  let evidence=this.store.list<Evidence>('evidence',mid).filter(source=>source.query===query);
+  const priorBrief=evidence.length?this.store.get<ResearchBrief>('researchBrief',briefKey):null;
+  if(evidence.length){
+   this.linkResearchEvidence(mid,[q.id],evidence);
    this.broadcast(mid);
-   return;
+   if(priorBrief?.status==='ready'||!this.providers.summarizeResearch)return;
   }
+
   const maxCalls=Number(process.env.AI_MAX_CALLS_PER_MEETING||150);
   const attempt=r.researchAttempts.get(query)??{questionIds:new Set<string>(),active:false,retryAt:0};
-  attempt.questionIds.add(q.id);
+  if(!evidence.length)attempt.questionIds.add(q.id);
   r.researchAttempts.set(query,attempt);
-  if(attempt.active||Date.now()<attempt.retryAt||r.calls>=maxCalls)return;
+  const retryAt=Math.max(attempt.retryAt,priorBrief?priorBrief.updatedAt+RESEARCH_RETRY_INTERVAL_MS:0);
+  if(attempt.active||Date.now()<retryAt||r.calls>=maxCalls)return;
   attempt.active=true;
-  r.calls++;
   const controller=new AbortController();
   r.controllers.add(controller);
-  let timer=setTimeout(()=>controller.abort(),18000);
+  const cancelled=new Promise<never>((_,reject)=>{
+   controller.signal.addEventListener('abort',()=>reject(controller.signal.reason),{once:true});
+  });
+  let timer:ReturnType<typeof setTimeout>|undefined;
   const started=Date.now();
-  this.status(mid,'research','正在检索公开技术资料');
   try{
-   const evidence=await this.providers.researchTopic(query,controller.signal);
-   if(!this.alive(mid,r))return;
-   if(controller.signal.aborted){
-    this.status(mid,'research','检索未完成，相关内容仍待核实');
-    return;
-   }
    if(!evidence.length){
-    this.status(mid,'research','没有找到可用资料，仍需核实',Date.now()-started);
-    return;
+    r.calls++;
+    timer=setTimeout(()=>controller.abort(),18000);
+    this.status(mid,'research','正在检索公开技术资料');
+    evidence=await Promise.race([this.providers.researchTopic(query,controller.signal),cancelled]);
+    if(!this.alive(mid,r))return;
+    controller.signal.throwIfAborted();
+    if(!evidence.length){
+     this.status(mid,'research','没有找到可用资料，仍需核实',Date.now()-started);
+     return;
+    }
+    for(const source of evidence)this.store.put('evidence',`${mid}:${source.id}`,mid,source);
+    this.linkResearchEvidence(mid,attempt.questionIds,evidence);
+    attempt.questionIds.clear();
+    this.broadcast(mid);
    }
-   for(const source of evidence)this.store.put('evidence',`${mid}:${source.id}`,mid,source);
-   this.linkResearchEvidence(mid,attempt.questionIds,evidence);
-   r.researchAttempts.delete(query);
-   this.broadcast(mid);
+
    let findings:ResearchFinding[]=[];
    if(this.providers.summarizeResearch&&r.calls<maxCalls){
     r.calls++;
@@ -379,13 +387,14 @@ export class LiveHub {
     timer=setTimeout(()=>controller.abort(),18000);
     this.status(mid,'research','来源已补充，正在整理中文资料');
     try{
-     findings=await this.providers.summarizeResearch(query,evidence,controller.signal);
-    }catch{/* The evidence remains available if its summary cannot be generated. */}
+     findings=await Promise.race([this.providers.summarizeResearch(query,evidence,controller.signal),cancelled]);
+    }catch{/* Keep the cached evidence available while the brief can be retried. */}
    }
    if(!this.alive(mid,r))return;
    if(controller.signal.aborted)findings=[];
    const brief:ResearchBrief={query,findings,status:findings.length?'ready':'unavailable',updatedAt:Date.now()};
-   this.store.put('researchBrief',`${mid}:${query}`,mid,brief);
+   this.store.put('researchBrief',briefKey,mid,brief);
+   if(findings.length)r.researchAttempts.delete(query);
    this.broadcast(mid);
    this.status(mid,'research',findings.length?'中文资料整理已更新':'中文资料整理未完成，可核对检索来源',Date.now()-started);
   }catch{

@@ -720,7 +720,7 @@ test('coaching keeps one question per round and suppresses reworded questions ab
   assert.deepEqual(f.store.snapshot('meeting','user').questions.map(q=>q.text),[first.text,distinct.text]);
 });
 
-function addResearchQuestion(f: ReturnType<typeof fixture>, id:string){
+function addResearchQuestion(f: Pick<ReturnType<typeof fixture>,'store'>, id:string){
  const question={id,text:'如何评估？',reason:'核对语种',quote:'语言',segmentIds:[],status:'new' as const,evidenceIds:[],createdAt:1,kind:'inference' as const};
  f.store.put('question',`meeting:${id}`,'meeting',question);
  return question;
@@ -777,6 +777,155 @@ for(const miss of ['empty','error'] as const)test(`a later question can retry re
  await f.hub.research('meeting',addResearchQuestion(f,'third'),query);
  assert.equal(calls,2);
  assert.deepEqual(f.store.snapshot('meeting','user').questions.map(question=>question.evidenceIds),[[source.id],[source.id],[source.id]]);
+});
+
+const researchQuery='RAG benchmark';
+const researchSource={id:'cached-source',title:'Report',url:'https://example.test/report',snippet:'English only',retrievedAt:10,query:researchQuery};
+const researchFinding={sourceId:researchSource.id,quote:'English only',point:'仅限英文。',relevance:'评测范围。',uncertainty:'中文待核实。'};
+
+for(const miss of ['error','empty','timeout'] as const)test(`cached research sources retry only the Chinese brief after ${miss}`,async t=>{
+ const f=fixture(t);
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+ let searches=0,summaries=0,releaseRetry!:(value:typeof researchFinding[])=>void,releaseExpired!:(value:typeof researchFinding[])=>void;
+ const retryResult=new Promise<typeof researchFinding[]>(resolve=>{releaseRetry=resolve;});
+ const expiredResult=new Promise<typeof researchFinding[]>(resolve=>{releaseExpired=resolve;});
+ f.providers.researchTopic=async()=>{searches++;return [researchSource];};
+ f.providers.summarizeResearch=async(_query,evidence)=>{
+  assert.deepEqual(evidence,[researchSource]);
+  if(++summaries>1)return retryResult;
+  if(miss==='error')throw new Error('temporary service failure');
+  if(miss==='empty')return [];
+  return expiredResult;
+ };
+ const first=f.hub.research('meeting',addResearchQuestion(f,'first'),researchQuery);
+ await settleMessages();
+ if(miss==='timeout')t.mock.timers.tick(18_000);
+ await first;
+ const initial=f.store.snapshot('meeting','user');
+ assert.equal(initial.researchBriefs?.[0].status,'unavailable');
+ assert.deepEqual(initial.evidence,[researchSource]);
+
+ t.mock.timers.tick(29_999);
+ await f.hub.research('meeting',addResearchQuestion(f,'in-cooldown'),researchQuery);
+ assert.equal(summaries,1);
+ assert.deepEqual(f.store.get<Question>('question','meeting:in-cooldown')?.evidenceIds,[researchSource.id]);
+ t.mock.timers.tick(1);
+ const retry=f.hub.research('meeting',addResearchQuestion(f,'retry'),researchQuery);
+ const joined=f.hub.research('meeting',addResearchQuestion(f,'concurrent'),researchQuery);
+ f.hub.final('meeting',segment('while-researching'));
+ assert.ok(f.store.get('segment','meeting:while-researching'));
+ assert.equal(summaries,2);
+ assert.equal(searches,1);
+ releaseRetry([researchFinding]);
+ await Promise.all([retry,joined]);
+ if(miss==='timeout'){
+  releaseExpired([{...researchFinding,point:'过期的整理结果。'}]);
+  await settleMessages();
+ }
+
+ t.mock.timers.tick(30_000);
+ await f.hub.research('meeting',addResearchQuestion(f,'after-success'),researchQuery);
+ const snapshot=f.store.snapshot('meeting','user');
+ assert.equal(summaries,2);
+ assert.equal(searches,1);
+ assert.deepEqual(snapshot.questions.map(question=>question.evidenceIds),Array.from({length:5},()=>[researchSource.id]));
+ assert.deepEqual(snapshot.researchBriefs?.map(brief=>[brief.status,brief.findings]),[['ready',[researchFinding]]]);
+});
+
+test('cached research sources without a brief can be summarized after reopening SQLite',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'vc-research-reopen-'));
+ const path=join(dir,'state.sqlite');
+ const f=fixture(t,path);
+ t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ f.store.put('evidence','meeting:cached-source','meeting',researchSource);
+ const question=addResearchQuestion(f,'after-reopen');
+ f.hub.close();
+ let searches=0,summaries=0;
+ f.providers.researchTopic=async()=>{searches++;return [];};
+ f.providers.summarizeResearch=async()=>{summaries++;return [researchFinding];};
+ const reopened=new Store(path);
+ const hub=new LiveHub(reopened,f.providers,dir);
+ try{
+  await hub.research('meeting',question,researchQuery);
+  const snapshot=reopened.snapshot('meeting','user');
+  assert.equal(searches,0);
+  assert.equal(summaries,1);
+  assert.deepEqual(snapshot.questions[0].evidenceIds,[researchSource.id]);
+  assert.deepEqual(snapshot.researchBriefs?.[0].findings,[researchFinding]);
+ }finally{hub.close();reopened.close();}
+});
+
+test('a failed Chinese brief preserves its retry cooldown after reopening SQLite',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'vc-research-cooldown-'));
+ const path=join(dir,'state.sqlite');
+ const f=fixture(t,path);
+ t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+ f.store.put('evidence','meeting:cached-source','meeting',researchSource);
+ let searches=0,summaries=0;
+ f.providers.researchTopic=async()=>{searches++;return [researchSource];};
+ f.providers.summarizeResearch=async()=>{
+  if(++summaries===1)throw new Error('temporary service failure');
+  return [researchFinding];
+ };
+ await f.hub.research('meeting',addResearchQuestion(f,'first'),researchQuery);
+ assert.equal(f.store.snapshot('meeting','user').researchBriefs?.[0].status,'unavailable');
+ f.hub.close();
+ const reopened=new Store(path);
+ const hub=new LiveHub(reopened,f.providers,dir);
+ try{
+  t.mock.timers.tick(29_999);
+  const early=addResearchQuestion({store:reopened},'before-cooldown');
+  await hub.research('meeting',early,researchQuery);
+  assert.equal(summaries,1);
+  assert.deepEqual(reopened.get<Question>('question',`meeting:${early.id}`)?.evidenceIds,[researchSource.id]);
+  t.mock.timers.tick(1);
+  await hub.research('meeting',addResearchQuestion({store:reopened},'at-cooldown'),researchQuery);
+  assert.equal(summaries,2);
+  assert.equal(searches,0);
+  const brief=reopened.snapshot('meeting','user').researchBriefs?.[0];
+  assert.equal(brief?.status,'ready');
+  assert.deepEqual(brief?.findings,[researchFinding]);
+ }finally{hub.close();reopened.close();}
+});
+
+test('cached research links stay visible when the Chinese brief has no remaining call budget',async t=>{
+ const f=fixture(t);
+ const previous=process.env.AI_MAX_CALLS_PER_MEETING;
+ process.env.AI_MAX_CALLS_PER_MEETING='2';
+ t.after(()=>{if(previous===undefined)delete process.env.AI_MAX_CALLS_PER_MEETING;else process.env.AI_MAX_CALLS_PER_MEETING=previous;});
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+ let searches=0,summaries=0;
+ f.providers.researchTopic=async()=>{searches++;return [researchSource];};
+ f.providers.summarizeResearch=async()=>{summaries++;return [];};
+ await f.hub.research('meeting',addResearchQuestion(f,'first'),researchQuery);
+ t.mock.timers.tick(30_000);
+ await f.hub.research('meeting',addResearchQuestion(f,'retry'),researchQuery);
+ assert.equal(searches,1);
+ assert.equal(summaries,1);
+ const snapshot=f.store.snapshot('meeting','user');
+ assert.deepEqual(snapshot.questions.map(question=>question.evidenceIds),[[researchSource.id],[researchSource.id]]);
+ assert.equal(snapshot.researchBriefs?.[0].status,'unavailable');
+});
+
+for(const action of ['dispose','delete'] as const)test(`cached research ignores a late Chinese brief after ${action}`,async t=>{
+ const f=fixture(t);
+ const question=addResearchQuestion(f,'question');
+ f.store.put('evidence','meeting:cached-source','meeting',researchSource);
+ let resolveLate!:(value:typeof researchFinding[])=>void,signal:AbortSignal|undefined;
+ const pending=new Promise<typeof researchFinding[]>(resolve=>{resolveLate=resolve;});
+ f.providers.summarizeResearch=async(_query,_evidence,currentSignal)=>{signal=currentSignal;return pending;};
+ const result=f.hub.research('meeting',question,researchQuery);
+ await settleMessages();
+ assert.ok(signal);
+ if(action==='delete'){
+  f.store.deleteScope('meeting');
+  f.store.deleteScope('project');
+ }else f.hub.dispose('meeting');
+ resolveLate([researchFinding]);
+ await result;
+ if(action==='dispose')assert.equal(signal.aborted,true);
+ assert.deepEqual(f.store.list('researchBrief','meeting'),[]);
 });
 
 test('analysis finishing after deletion does not recreate orphan questions',async t=>{
