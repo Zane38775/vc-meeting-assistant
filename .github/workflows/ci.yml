@@ -65,6 +65,22 @@ jobs:
         if: runner.os == 'macOS'
         run: npm run package:mac
 
+      - name: Verify installed Mac ASR crash recovery
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          staging_dir="$(mktemp -d "$RUNNER_TEMP/vc-asr-install.XXXXXX")"
+          env HOME="$staging_dir" bash "release/VC Meeting Assistant-darwin-arm64/Install-on-Mac.command" </dev/null
+          node tests/asr-packaged-smoke.mjs "$staging_dir/Applications/VC Meeting Assistant.app/Contents/MacOS/VC Meeting Assistant"
+
+      - name: Build unpacked Windows app
+        if: runner.os == 'Windows'
+        run: npx --no-install electron-builder --win --x64 --dir
+
+      - name: Verify packaged Windows ASR crash recovery
+        if: runner.os == 'Windows'
+        run: node tests/asr-packaged-smoke.mjs "release/win-unpacked/VC Meeting Assistant.exe"
+
       - name: Archive and verify Mac package
         if: runner.os == 'macOS'
         run: python3 scripts/archive-mac.py
