@@ -45,7 +45,27 @@ export class LiveHub {
  constructor(public store:Store,public providers:ProviderAPI,public dataDir:string){
   store.recoverInterruptedMeetings();
  }
- runtime(mid:string){if(this.closed)failure('服务已经关闭',503);let r=this.runtimes.get(mid);if(!r){r={busy:false,pendingSegments:new Map(),calls:0,controllers:new Set(),demoIndex:0,lastAudioSeq:-1,researchAttempts:new Map(),generation:0};this.runtimes.set(mid,r)}return r;}
+ runtime(mid:string){
+  if(this.closed)failure('服务已经关闭',503);
+  let r=this.runtimes.get(mid);
+  if(!r){
+   r={busy:false,pendingSegments:new Map(),calls:0,lastAnalysis:this.previousAnalysisAt(mid),controllers:new Set(),demoIndex:0,lastAudioSeq:-1,researchAttempts:new Map(),generation:0};
+   this.runtimes.set(mid,r);
+  }
+  return r;
+ }
+ private previousAnalysisAt(mid:string):number|undefined {
+  const attempt=this.store.get<{startedAt:number}>('coachingAttempt',mid);
+  if(attempt)return attempt.startedAt;
+  // Older meetings only recorded successful drafts. Manual questions have no measured latency.
+  let last: number|undefined;
+  for(const {quote,createdAt,latencyMs} of this.store.list<Question>('question',mid)){
+   if(!quote||latencyMs===undefined||!Number.isFinite(latencyMs)||!Number.isFinite(createdAt))continue;
+   const startedAt=createdAt-Math.max(0,latencyMs);
+   last=Math.max(last??startedAt,startedAt);
+  }
+  return last;
+ }
  alive(mid:string,r?:Runtime){if(this.closed||(r&&this.runtimes.get(mid)!==r))return false;const m=this.store.get<Meeting>('meeting',mid);return Boolean(m&&this.store.get('project',m.projectId));}
  send(socket:WebSocket,event:LiveEvent){if(socket.readyState===1){if(socket.bufferedAmount>2*1024*1024){socket.close(4008,'读取过慢，请重新连接');return}socket.send(JSON.stringify(event));}}
  status(mid:string,stage:string,message:string,latencyMs?:number){if(!this.alive(mid))return;for(const p of this.peers)if(p.mid===mid)this.send(p.socket,{type:'status',stage,message,latencyMs});}
@@ -281,6 +301,7 @@ export class LiveHub {
   try{
    const input=this.input(mid);
    const sourceDigest=coachingProjectDigest(input);
+   this.store.put('coachingAttempt',mid,mid,{startedAt:started});
    const {questions:[draft]}=await this.providers.analyzeContext({...input,newSegmentIds},controller.signal);
    if(controller.signal.aborted||!this.alive(mid,r))return;
    const existing=this.store.list<Question>('question',mid);

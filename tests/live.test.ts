@@ -11,7 +11,7 @@ import {Store} from '../server/store';
 import {LiveHub} from '../server/live';
 import {preparationSourceDigest,type StoredPreparation} from '../server/project-preparation';
 import type {AnalysisInput,ASRCallbacks,ProviderAPI} from '../server/providers/contracts';
-import type {Material,Meeting,Segment} from '../shared/types';
+import type {Material,Meeting,Question,Segment} from '../shared/types';
 
 class Socket extends EventEmitter {
   readyState=1; bufferedAmount=0; messages:any[]=[];
@@ -505,6 +505,65 @@ test('live analysis accumulates unique final text and spaces rounds 30 seconds a
   await settleMessages();
   assert.deepEqual(calls.map(input=>input.newSegmentIds),[['a','b'],['c']]);
   assert.ok(f.socket.messages.some(m=>m.stage==='coach'&&m.message==='已梳理，暂无值得打断的追问'));
+});
+
+for(const history of ['legacy questions','no question','failed attempt','manual only'] as const)
+test(`rebuilding the live service restores coaching cadence from ${history}`,async t=>{
+  const f=fixture(t);
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+  f.providers.getCapabilities=()=>({asr:true,deepseek:true,model:'test',version:'test'});
+  const calls:(string[]|undefined)[]=[];
+  f.providers.analyzeContext=async input=>{
+    calls.push(input.newSegmentIds);
+    if(history==='failed attempt'&&input.newSegmentIds?.includes('before-restart'))throw new Error('Test provider failure');
+    return {questions:[]};
+  };
+  const manual:Question={id:'manual',text:'手动补充的问题',reason:'用户补充',quote:'',segmentIds:[],evidenceIds:[],
+    status:'new',kind:'inference',createdAt:60_000};
+  f.store.put('question','meeting:manual','meeting',manual);
+  if(history==='legacy questions'){
+    for(const [id,createdAt] of [['older',40_000],['latest',57_000]] as const){
+      f.store.put('question',`meeting:${id}`,'meeting',{
+        ...manual,id,createdAt,reason:'核对客户需求。',quote:'已开展客户试点',segmentIds:['previous'],latencyMs:2000,
+      });
+    }
+  }else if(history!=='manual only'){
+    await f.command('start');
+    f.sessions[0].callbacks.onSegment({...segment('before-restart'),text:'材料已明确提供客户试点信息'.repeat(8)});
+    t.mock.timers.tick(0);
+    await settleMessages();
+    await f.command('pause');
+    assert.deepEqual(calls,[['before-restart']]);
+  }
+  f.hub.close();
+  const reopened=new LiveHub(f.store,f.providers,'.');
+  try {
+    const socket=new Socket() as any;
+    reopened.attach(socket,f.user,'meeting');
+    const peer={...f.peer,socket};
+    await reopened.command(peer,{type:'resume'});
+    const resumed=f.sessions.at(-1)!;
+    const closing='先暂停一下。';
+    resumed.finish=async()=>resumed.callbacks.onSegment({...segment('after-restart-tail'),text:closing});
+    await reopened.command(peer,{type:'pause'});
+    t.mock.timers.tick(0);
+    await settleMessages();
+    assert.equal(f.store.list<Segment>('segment','meeting').find(item=>item.id==='after-restart-tail')?.text,closing);
+    if(history==='manual only'){
+      assert.deepEqual(calls,[['after-restart-tail']]);
+      return;
+    }
+    const previous=history==='legacy questions'?[]:[['before-restart']];
+    assert.deepEqual(calls,previous);
+    await reopened.command(peer,{type:'resume'});
+    f.sessions.at(-1)!.callbacks.onSegment({...segment('new-evidence'),text:'本轮新增客户验证与试点指标'.repeat(8)});
+    t.mock.timers.tick(history==='legacy questions'?24_999:29_999);
+    await settleMessages();
+    assert.deepEqual(calls,previous);
+    t.mock.timers.tick(1);
+    await settleMessages();
+    assert.deepEqual(calls,[...previous,['after-restart-tail','new-evidence']]);
+  }finally{reopened.close();}
 });
 
 for(const change of ['material','preparation','comment'] as const)test(`coaching checks source changes while a draft is pending: ${change}`,async t=>{
