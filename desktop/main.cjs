@@ -81,6 +81,7 @@ async function launch() {
       // point to a real OS directory, while module/static paths may use ASAR.
       cwd: app.isPackaged ? process.resourcesPath : app.getAppPath(),
       env: {...process.env, HOST:'127.0.0.1', PORT:'4318', DATA_DIR:userData,
+        VC_ASR_EXEC_PATH:app.getPath('exe'),
         CLIENT_DIR:path.join(app.getAppPath(), 'dist', 'client'),
         DOTENV_CONFIG_PATH:configPath,
         ASR_MODEL_DIR:process.env.ASR_MODEL_DIR || path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'models', 'local-asr'),

@@ -4,6 +4,8 @@ import workletUrl from './pcm-worklet.js?worker&url';
 export interface CaptureOptions {
   mode: 'online' | 'offline';
   deviceId?: string;
+  startPaused?: boolean;
+  signal?: AbortSignal;
   onChunk: (chunk: {pcm: string; capturedAt: number; seq: number}) => void;
   onLevels: (levels: {mic: number; system: number}) => void;
   onError: (error: Error) => void;
@@ -31,12 +33,18 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
   let processor: AudioWorkletNode | undefined;
   let state: 'starting'|'running'|'paused'|'stopping'|'stopped' = 'starting';
   let failed = false;
+  let waitingForFirstResume = Boolean(options.startPaused);
   let seq = 0;
   let anchor = 0;
   let finishStop: ((error?: Error) => void) | undefined;
   let stopPromise: Promise<void> | undefined;
   let watchdog: ReturnType<typeof setInterval> | undefined;
   let lastFrame = performance.now();
+  let cancelSetup!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    cancelSetup = () => reject(new Error('已取消选择音频来源。'));
+  });
+  options.signal?.addEventListener('abort', cancelSetup, {once: true});
 
   const cleanup = async () => {
     state = 'stopped';
@@ -66,10 +74,11 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
         throw new Error(`${label}授权已超时，请重新开始。`);
       }
       streams.push(stream);
+      if (options.startPaused) stream.getAudioTracks().forEach(track => {track.enabled = false;});
       return stream;
     });
     try {
-      return await Promise.race([tracked, new Promise<never>((_, reject) => {
+      return await Promise.race([tracked, cancelled, new Promise<never>((_, reject) => {
         timer = setTimeout(() => {timedOut = true; reject(new Error(`${label}授权超时，请确认系统权限后重新开始。`));}, 60000);
       })]);
     } finally { if (timer) clearTimeout(timer); }
@@ -85,7 +94,8 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
   };
 
   try {
-    if (window.vcDesktop) await window.vcDesktop.authorizeCapture(options.mode);
+    options.signal?.throwIfAborted();
+    if (window.vcDesktop) await Promise.race([window.vcDesktop.authorizeCapture(options.mode), cancelled]);
     // Request display capture first while the initiating click is still active.
     // Both promises start together and late-granted streams are always released.
     let displayRequest: Promise<MediaStream> | undefined;
@@ -108,10 +118,11 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
     if (system) validate(system, '系统音频');
     context = new AudioContext({latencyHint:'interactive'});
     if (!context.audioWorklet) throw new Error('当前浏览器不支持 AudioWorklet，请升级浏览器或使用桌面应用。');
-    await context.audioWorklet.addModule(workletUrl);
+    await Promise.race([context.audioWorklet.addModule(workletUrl), cancelled]);
     if (failed) throw new Error('音频设备在初始化过程中断开。');
     processor = new AudioWorkletNode(context, 'meeting-audio', {
       numberOfInputs:2, numberOfOutputs:1, outputChannelCount:[1], channelCountMode:'max',
+      processorOptions:{startPaused: Boolean(options.startPaused)},
     });
     nodes.push(processor);
     processor.onprocessorerror = () => fail(new Error('音频处理器意外停止，请重新开始录音。'));
@@ -139,10 +150,10 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
     connect(mic, 0);
     if (system) connect(system, 1);
     processor.connect(context.destination);
-    await context.resume();
+    await Promise.race([context.resume(), cancelled]);
     if (context.state !== 'running') throw new Error('音频设备尚未启动，请再次点击开始录音。');
     anchor = Date.now() - context.currentTime * 1000;
-    state = 'running';
+    state = options.startPaused ? 'paused' : 'running';
     lastFrame = performance.now();
     watchdog = setInterval(() => {
       if (state === 'running' && performance.now() - lastFrame > 3000) fail(new Error('超过 3 秒未收到音频数据，录音已停止。请检查设备或系统休眠状态。'));
@@ -151,6 +162,10 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
       stop() {
         if (stopPromise) return stopPromise;
         if (state === 'stopped') return Promise.resolve();
+        if (waitingForFirstResume && state === 'paused') {
+          stopPromise = cleanup();
+          return stopPromise;
+        }
         state = 'stopping';
         if (watchdog) clearInterval(watchdog);
         streams.forEach(stream => stream.getTracks().forEach(track => track.stop()));
@@ -184,6 +199,7 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
         }
         streams.forEach(stream => stream.getAudioTracks().forEach(track => {track.enabled = true;}));
         processor?.port.postMessage({type:'resume'});
+        waitingForFirstResume = false;
         lastFrame = performance.now();
         state = 'running';
       },
@@ -192,5 +208,7 @@ export async function captureAudio(options: CaptureOptions): Promise<CaptureHand
     failed = true;
     await cleanup();
     throw asError(error);
+  } finally {
+    options.signal?.removeEventListener('abort', cancelSetup);
   }
 }

@@ -61,7 +61,7 @@ test('source meters use actual source samples and stereo is reduced to mono', ()
   assert.equal(mixAndMeasure(mic, [], 2).system, 0);
 });
 
-function workletHarness() {
+function workletHarness(startPaused = false) {
   const messages: any[] = [];
   let Processor: any;
   const code = buildSync({entryPoints:[fileURLToPath(new URL('../client/pcm-worklet.js', import.meta.url))], bundle:true, write:false, format:'iife'}).outputFiles[0].text;
@@ -69,7 +69,7 @@ function workletHarness() {
     port = {onmessage: null as any, postMessage(message: any) {messages.push(message);}};
   }, registerProcessor(_name: string, implementation: any) { Processor = implementation; }};
   runInNewContext(code, scope);
-  const processor = new Processor();
+  const processor = new Processor({processorOptions:{startPaused}});
   return {messages, processor, render(count:number) {for(let i=0;i<count;i++) {scope.currentTime += 128/48000; processor.process([[new Float32Array(128).fill(0.5)],[]], [[new Float32Array(128)]]);}}};
 }
 
@@ -81,6 +81,16 @@ test('worklet flushes final speech on stop and emits no more audio afterwards', 
   assert.equal(messages.at(-1).type, 'stopped');
   render(100);
   assert.equal(messages.filter(m => m.type === 'frame').length, 1);
+});
+
+test('worklet discards warmup samples without encoding or queueing them', () => {
+  const {processor, messages, render} = workletHarness(true);
+  render(1950); // 5.2 seconds at 48 kHz, 128 samples per processing quantum
+  assert.equal(messages.length, 0);
+  processor.port.onmessage({data:{type:'resume'}});
+  render(75);
+  assert.equal(messages.filter(m => m.type === 'frame').length, 1);
+  assert.equal(messages.some(m => m.type === 'error'), false);
 });
 
 test('worklet bounds undelivered audio instead of queuing endlessly on a blocked renderer', () => {
@@ -168,6 +178,22 @@ test('microphone permission resolving after display rejection is released immedi
   grant(mic);
   await new Promise(resolve => setTimeout(resolve,0));
   assert.equal(mic.track.readyState,'ended');
+});
+
+test('cancelling device selection releases an acquired microphone and later screen permission', async () => {
+  const mic = fakeStream(), screen = fakeStream();
+  let grantScreen!: (stream: unknown) => void;
+  const controller = new AbortController();
+  const capture = await captureHarness({getUserMedia:async()=>mic, getDisplayMedia:()=>new Promise(resolve=>{grantScreen=resolve;})});
+  const pending = capture({mode:'online',signal:controller.signal,startPaused:true,...captureCallbacks});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((mic.track as typeof mic.track & {enabled:boolean}).enabled, false);
+  controller.abort();
+  await assert.rejects(pending, /取消/);
+  assert.equal(mic.track.readyState, 'ended');
+  grantScreen(screen);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(screen.track.readyState, 'ended');
 });
 
 async function activeCapture() {

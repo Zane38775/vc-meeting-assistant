@@ -28,7 +28,7 @@ function fixture(t:any, dbPath=':memory:') {
   const sessions:Array<{callbacks:ASRCallbacks;writes:Buffer[];closed:boolean;finish:()=>Promise<void>;close:()=>void;write:(b:Buffer)=>void;hotwords?:readonly string[]}>=[];
   const providers:ProviderAPI={getCapabilities:()=>({asr:true,deepseek:false,model:'test',version:'test'}),analyzeContext:async()=>({questions:[]}),researchTopic:async()=>[],summarizeMeeting:async()=>'',summarizeMaterial:async()=>'',createASR(callbacks,options){
     const session={callbacks,hotwords:options?.hotwords,writes:[] as Buffer[],closed:false,finish:async()=>{},close(){this.closed=true;},write(b:Buffer){this.writes.push(b);}};
-    sessions.push(session); return session;
+    sessions.push(session); callbacks.onReady?.(); return session;
   }};
   const hub=new LiveHub(store,providers,'.');
   const socket=new Socket();hub.attach(socket as any,user,'meeting');
@@ -39,6 +39,37 @@ function fixture(t:any, dbPath=':memory:') {
 const segment=(id='sentence'):Segment=>({id,text:'最后一句完整语音',speaker:'speaker_0',startMs:0,endMs:1000,receivedAt:Date.now(),source:'asr',final:true});
 const settleMessages = () => new Promise<void>(resolve => setImmediate(resolve));
 
+test('cold capture never queues audio and only the current recording socket receives ready', async t => {
+  const f = fixture(t);
+  const create = f.providers.createASR;
+  const inits: ASRCallbacks[] = [];
+  f.providers.createASR = (cb, options) => {
+    inits.push(cb);
+    return create({...cb, onReady: undefined}, options);
+  };
+  const observer = new Socket();
+  f.hub.attach(observer as any, f.user, 'meeting');
+  const start = (requestId: string) => f.hub.command(f.peer, {type:'start', requestId});
+  await start('first');
+  const audio = {type:'audio', seq:1, capturedAt:0, pcm:'AAA='} as const;
+  await assert.rejects(f.hub.command(f.peer,audio), /就绪/);
+  assert.equal(f.sessions[0].writes.length,0);
+  let finishedCold = false;
+  f.sessions[0].finish = async () => { finishedCold = true; };
+  await f.command('pause');
+  assert.equal(finishedCold,false);
+  assert.equal(f.sessions[0].closed,true);
+  await start('second');
+  inits[0].onReady?.();
+  assert.equal(f.socket.messages.some(e=>e.type==='asr.ready'),false);
+  inits[1].onReady?.();
+  inits[1].onReady?.();
+  assert.deepEqual(f.socket.messages.filter(e=>e.type==='asr.ready'),[{type:'asr.ready', requestId:'second'}]);
+  assert.equal(observer.messages.some(e=>e.type==='asr.ready'),false);
+  await f.hub.command(f.peer,audio);
+  assert.equal(f.sessions[1].writes.length,1);
+});
+
 async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () => void) => Promise<void> = async () => {}, holdResume?: (deliver: () => void) => void) {
   const code = buildSync({
     entryPoints: [fileURLToPath(new URL('../client/useMeeting.ts', import.meta.url))],
@@ -46,6 +77,8 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
   }).outputFiles[0].text;
   const errors: string[] = [];
   let stops = 0;
+  let resumes = 0;
+  const sent: Array<{type:string; requestId?:string}> = [];
   let pushAudio = () => {};
   class BrowserSocket {
     static OPEN = 1;
@@ -58,6 +91,7 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
       queueMicrotask(() => this.onopen?.());
     }
     send(raw: string) {
+      sent.push(JSON.parse(raw));
       const deliver = () => f.socket.emit('message', Buffer.from(raw));
       if (holdResume && JSON.parse(raw).type === 'resume') holdResume(deliver);
       else queueMicrotask(deliver);
@@ -66,7 +100,7 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
   const scope = {
     module: {exports: {} as {useMeeting: typeof import('../client/useMeeting').useMeeting}},
     URL, WebSocket: BrowserSocket, window: {location: {href: 'http://localhost/meeting'}},
-    setInterval: () => 1,
+    crypto, AbortController, setTimeout, clearTimeout, setInterval: () => 1,
     require(name: string) {
       switch (name) {
         case 'react':
@@ -79,10 +113,11 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
         case './api':
           return {api: async () => f.store.snapshot('meeting', 'user')};
         case './audio':
-          return {captureAudio: async ({onChunk}: import('../client/audio').CaptureOptions) => {
+          return {captureAudio: async ({onChunk,startPaused}: import('../client/audio').CaptureOptions) => {
+            assert.equal(startPaused, true);
             const onAudio = () => onChunk({pcm: 'AQA=', capturedAt: 1, seq: 0});
             pushAudio = onAudio;
-            return {async stop() { stops++; await stop(onAudio); }};
+            return {resume() { resumes++; }, async stop() { stops++; await stop(onAudio); }};
           }};
         default:
           throw new Error(`Unexpected test dependency ${name}`);
@@ -95,8 +130,47 @@ async function recordingClient(f: ReturnType<typeof fixture>, stop: (onTail: () 
   await client.begin();
   await settleMessages();
   assert.equal(f.store.snapshot('meeting', 'user').meeting.status, 'live');
-  return {client, errors, get stops() { return stops; }, pushAudio: () => pushAudio()};
+  return {client, errors, sent, get stops() { return stops; }, get resumes() { return resumes; }, pushAudio: () => pushAudio()};
 }
+
+test('a cold client sends zero frames for 5.2s of input, ignores cancelled startup replies, and resumes only its current request', async t => {
+  const f = fixture(t);
+  const original = f.providers.createASR;
+  const startups: ASRCallbacks[] = [];
+  f.providers.createASR = (callbacks, options) => {
+    startups.push(callbacks);
+    return original({...callbacks, onReady:undefined}, options);
+  };
+  const recorder = await recordingClient(f);
+  const firstId = recorder.sent.find(command => command.type === 'start')!.requestId;
+  assert.ok(firstId);
+  for (let i=0; i<26; i++) recorder.pushAudio();
+  await settleMessages();
+  assert.equal(recorder.sent.filter(c=>c.type==='audio').length,0);
+  assert.equal(recorder.resumes,0);
+  await recorder.client.control('pause');
+  await settleMessages();
+  assert.equal(recorder.stops,1);
+  await recorder.client.begin();
+  await settleMessages();
+  const secondId = recorder.sent.find(command => command.type === 'resume')!.requestId;
+  assert.ok(secondId && secondId !== firstId);
+  f.socket.send(JSON.stringify({type:'asr.ready',requestId:firstId}));
+  f.socket.send(JSON.stringify({type:'error',command:'start',requestId:firstId,message:'obsolete'}));
+  await settleMessages();
+  recorder.pushAudio();
+  assert.equal(recorder.resumes,0);
+  assert.equal(recorder.sent.filter(c=>c.type==='audio').length,0);
+  assert.deepEqual(recorder.errors,[]);
+  startups[1].onReady?.();
+  await settleMessages();
+  recorder.pushAudio();
+  await settleMessages();
+  assert.equal(recorder.resumes,1);
+  assert.equal(f.sessions[0].writes.length,0);
+  assert.equal(f.sessions[1].writes.length,1);
+  await recorder.client.control('stop');
+});
 
 test('a rejected manual supplement leaves the real recording and ASR session active', async t => {
   const f = fixture(t);

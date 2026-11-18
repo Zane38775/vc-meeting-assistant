@@ -62,7 +62,7 @@ export function createTencentASR(callbacks:ASRCallbacks,config=tencentConfig(),o
    const length=Array.isArray(data)?data.reduce((n,b)=>n+b.byteLength,0):data.byteLength;
    if(isBinary||length>1024*1024)throw new Error('腾讯云转写响应格式错误');
    const m=mapTencentMessage(JSON.parse(data.toString()),voiceId);
-   if(!ready){ready=true;clearTimeout(handshakeTimer);callbacks.onStatus('实时转写已连接');}
+   if(!ready){ready=true;lastInput=Date.now();clearTimeout(handshakeTimer);callbacks.onStatus('实时转写已连接');if(!closed)callbacks.onReady?.();}
    for(const s of m.segments){const signature=JSON.stringify([s.text,s.speaker,s.final,s.startMs,s.endMs]);if(seen.get(s.id)!==signature){seen.set(s.id,signature);callbacks.onSegment(s);}if(seen.size>2000)seen.delete(seen.keys().next().value!);}
    if(m.done){closed=true;clear();resolveFinish?.();ws.close(1000);callbacks.onStatus('实时转写已完成');}else pump();
   }catch(error){fail(error instanceof SyntaxError?new Error('腾讯云转写响应不是有效 JSON'):error as Error);}
@@ -70,7 +70,7 @@ export function createTencentASR(callbacks:ASRCallbacks,config=tencentConfig(),o
  ws.on('error',()=>fail(new Error('腾讯云转写连接失败，请检查网络与服务配置')));
  ws.on('close',()=>{if(!closed)fail(new Error('腾讯云转写连接提前关闭，末尾音频可能缺失'));});
  return {
-  write(pcm){if(closed||ending)throw failure??new Error('实时转写已关闭');if(!Buffer.isBuffer(pcm)||!pcm.length||pcm.length%2||pcm.length>32000)throw new Error('音频必须是 16kHz 单声道 PCM16，单次最多 1 秒');if(pending.length+pcm.length>160000){fail(new Error('待发送音频超过 5 秒，已停止以避免持续积压，请重新开始'));return;}pending=Buffer.concat([pending,pcm]);lastInput=Date.now();pump();},
+  write(pcm){if(closed||ending)throw failure??new Error('实时转写已关闭');if(!Buffer.isBuffer(pcm)||!pcm.length||pcm.length%2||pcm.length>32000)throw new Error('音频必须是 16kHz 单声道 PCM16，单次最多 1 秒');if(pending.length+pcm.length>160000){const error=new Error('待发送音频超过 5 秒，已停止以避免持续积压，请重新开始');fail(error);throw error;}pending=Buffer.concat([pending,pcm]);lastInput=Date.now();pump();if(failure)throw failure;},
   finish(){if(finishPromise)return finishPromise;if(closed)return failure?Promise.reject(failure):Promise.resolve();ending=true;finishPromise=new Promise<void>((resolve,reject)=>{resolveFinish=resolve;rejectFinish=reject;});finalTimer=setTimeout(()=>fail(new Error('等待转写末尾结果超时，末尾音频可能缺失')),options.finishMs??15000);pump();return finishPromise;},
   close(){if(closed)return;closed=true;failure=new Error('实时转写已取消');clear();rejectFinish?.(failure);ws.terminate();}
  };

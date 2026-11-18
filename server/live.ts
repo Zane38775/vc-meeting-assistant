@@ -8,7 +8,10 @@ import {currentPreparation} from './project-preparation';
 import type {ProviderAPI,ASRSession,AnalysisInput,QuestionDraft} from './providers/contracts';
 type Peer={socket:WebSocket;user:User;mid:string};
 type ResearchAttempt={questionIds:Set<string>;active:boolean;retryAt:number};
-type Runtime={asr?:ASRSession;timer?:ReturnType<typeof setTimeout>;demoTimer?:ReturnType<typeof setInterval>;busy:boolean;pendingSegments:Map<string,number>;flushAnalysis?:boolean;calls:number;lastAnalysis?:number;controllers:Set<AbortController>;demoIndex:number;recordingPeer?:WebSocket;lastAudioSeq:number;audioRejected?:boolean;researchAttempts:Map<string,ResearchAttempt>;generation:number;transition?:Promise<void>};
+type Runtime={asr?:ASRSession;asrReady?:boolean;startRequestId?:string;timer?:ReturnType<typeof setTimeout>;demoTimer?:ReturnType<typeof setInterval>;busy:boolean;pendingSegments:Map<string,number>;flushAnalysis?:boolean;calls:number;lastAnalysis?:number;controllers:Set<AbortController>;demoIndex:number;recordingPeer?:WebSocket;lastAudioSeq:number;audioRejected?:boolean;researchAttempts:Map<string,ResearchAttempt>;generation:number;transition?:Promise<void>};
+function validRequestId(value:unknown):value is string {
+ return typeof value==='string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
+}
 const MIN_ANALYSIS_INTERVAL_MS=30_000;
 const RESEARCH_RETRY_INTERVAL_MS=30_000;
 const MIN_FRESH_TEXT=80;
@@ -59,7 +62,8 @@ export class LiveHub {
    await this.command(p,cmd);
   }catch(error){
    const command=typeof cmd?.type==='string'&&cmd.type.length<=32?cmd.type:undefined;
-   this.send(p.socket,{type:'error',message:error instanceof Error?error.message:'操作失败',command});
+   const requestId=(cmd?.type==='start'||cmd?.type==='resume') && validRequestId(cmd.requestId) ? cmd.requestId : undefined;
+   this.send(p.socket,{type:'error',message:error instanceof Error?error.message:'操作失败',command,requestId});
   }
  }
  async command(p:Peer,cmd:LiveCommand){if(this.closed)failure('服务已经关闭',503);const m=this.store.meeting(p.mid,p.user.id);if(cmd.type==='ping'){this.send(p.socket,{type:'pong'});return}if(m.ownerId!==p.user.id)failure('仅会议主持人可以控制录音',403);const r=this.runtime(m.id);
@@ -67,11 +71,35 @@ export class LiveHub {
     if(r.transition)failure('正在完成上一段语音，请稍后再试',409);
     if(r.recordingPeer&&r.recordingPeer!==p.socket)failure('另一窗口正在收音，请从该窗口控制录音',409);
   }
-  if(cmd.type==='start'||cmd.type==='resume'||cmd.type==='demo.start'){if(m.status==='ended')failure('会议已经结束');if(r.recordingPeer&&r.recordingPeer!==p.socket)failure('另一窗口正在收音');if(cmd.type==='demo.start'&&!m.demo)failure('真实会议不能切换成演示');if(!m.demo&&!this.providers.getCapabilities().asr)failure('本地语音模型尚未就绪，请检查模型文件与系统支持情况');if(m.status==='live'&&r.recordingPeer===p.socket)return;r.recordingPeer=p.socket;r.lastAudioSeq=-1;r.audioRejected=false;m.status='live';m.startedAt??=Date.now();this.store.put('meeting',m.id,m.projectId,m);if(m.demo)this.startDemo(m);else this.openASR(m);this.broadcast(m.id);return;}
+  if(cmd.type==='start'||cmd.type==='resume'||cmd.type==='demo.start'){
+    if(m.status==='ended')failure('会议已经结束');
+    if(cmd.type==='demo.start'&&!m.demo)failure('真实会议不能切换成演示');
+    if(!m.demo&&!this.providers.getCapabilities().asr)failure('本地语音模型尚未就绪，请检查模型文件与系统支持情况');
+    const requestId='requestId' in cmd ? cmd.requestId : undefined;
+    if(requestId!==undefined&&!validRequestId(requestId))failure('无效的采集启动编号');
+    if(m.status==='live'&&r.recordingPeer===p.socket){
+      if(requestId!==r.startRequestId)failure('当前窗口已有采集，请先暂停后再试',409);
+      if(requestId&&r.asrReady)this.send(p.socket,{type:'asr.ready',requestId});
+      return;
+    }
+    r.recordingPeer=p.socket;
+    r.startRequestId=requestId;
+    r.asrReady=false;
+    r.lastAudioSeq=-1;
+    r.audioRejected=false;
+    m.status='live';
+    m.startedAt??=Date.now();
+    this.store.put('meeting',m.id,m.projectId,m);
+    if(m.demo)this.startDemo(m);
+    else this.openASR(m,p.socket,cmd.type==='resume'?'resume':'start',requestId);
+    this.broadcast(m.id);
+    return;
+  }
   if(cmd.type==='pause'){if(m.status==='ended')return;await this.finish(m.id,'paused');return;}
   if(cmd.type==='stop'){if(m.status==='ended')return;await this.finish(m.id,'ended');return;}
   if(cmd.type==='audio'){
    if(m.demo||m.status!=='live'||r.recordingPeer!==p.socket)failure('当前没有开启真实收音');
+   if(!r.asrReady)failure('语音模型尚未就绪，请等待启动完成再开始讲话',409);
    try{
     if(!Number.isSafeInteger(cmd.seq)||cmd.seq<0||typeof cmd.pcm!=='string'||cmd.pcm.length>30000)failure('无效音频帧');
     if(cmd.seq<=r.lastAudioSeq){this.send(p.socket,{type:'audio.ack',seq:cmd.seq});return;}
@@ -94,18 +122,32 @@ export class LiveHub {
   if(cmd.type==='transcript.manual'){if(m.status==='ended')failure('会议已结束');if(typeof cmd.text!=='string'||!cmd.text.trim()||cmd.text.length>6000)failure('请输入有效文字');const at=Math.max(0,Date.now()-(m.startedAt||Date.now()));this.final(m.id,{id:id(),text:cmd.text.trim(),speaker:String(cmd.speaker||'手动补充').slice(0,60),startMs:at,endMs:at,receivedAt:Date.now(),final:true,source:'manual'});return;}
   if(cmd.type==='gap'){this.gap(m.id,String(cmd.message||'转写中断').slice(0,300));return;}failure('不支持的消息类型');
  }
- openASR(m:Meeting){
+ openASR(m:Meeting,owner:WebSocket,command:'start'|'resume',requestId?:string){
   const r=this.runtime(m.id),generation=++r.generation;
   const previous=r.asr;r.asr=undefined;previous?.close();
   const current=()=>this.alive(m.id,r)&&r.generation===generation;
-  const offset=Math.max(0,Date.now()-(m.startedAt||Date.now()));
+  let offset=0;
   try{
     const hotwords=this.store.list<Material>('material',m.projectId)
       .flatMap(material=>validatedMaterialTerms(material.pages,material.terms).map(({term})=>term));
     const session=this.providers.createASR({
+      onReady:()=>{
+        if(!current()||r.asrReady||r.transition)return;
+        r.asrReady=true;
+        offset=Math.max(0,Date.now()-(m.startedAt||Date.now()));
+        if(requestId)this.send(owner,{type:'asr.ready',requestId});
+      },
       onSegment:s=>{if(!current())return;const segment={...s,startMs:s.startMs+offset,endMs:s.endMs+offset};if(segment.final)this.final(m.id,segment);else for(const p of this.peers)if(p.mid===m.id)this.send(p.socket,{type:'transcript.partial',data:segment});},
       onStatus:message=>{if(current())this.status(m.id,'asr',message);},
-      onError:error=>{if(!current())return;this.status(m.id,'asr',error.message);if(r.transition)return;this.pause(m.id);this.gap(m.id,'语音识别中断，未确认的语音可能缺失。请检查连接后继续。');},
+      onError:error=>{
+        if(!current())return;
+        this.status(m.id,'asr',error.message);
+        if(r.transition)return;
+        const wasReady=r.asrReady;
+        if(!wasReady)this.send(owner,{type:'error',command,requestId,message:error.message});
+        this.pause(m.id);
+        if(wasReady)this.gap(m.id,'语音识别中断，未确认的语音可能缺失。请检查连接后继续。');
+      },
     },{hotwords});
     if(current())r.asr=session;else session.close();
   }catch(e){if(current())this.pause(m.id);throw e;}
@@ -113,6 +155,13 @@ export class LiveHub {
  async finish(mid:string,target:'paused'|'ended'){
   const r=this.runtime(mid);if(r.transition)failure('正在完成上一段语音，请稍后再试',409);
   const m=this.store.get<Meeting>('meeting',mid);if(!m||!this.alive(mid,r))return;
+  // A warming recognizer has accepted no frames, so cancellation has no tail to drain.
+  if(r.asr&&!r.asrReady){
+    ++r.generation;
+    const warming=r.asr;
+    r.asr=undefined;
+    warming.close();
+  }
   const session=r.asr,generation=r.generation;
   m.status='paused';if(session)m.finishingCapture=true;
   this.store.put('meeting',mid,m.projectId,m);

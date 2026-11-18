@@ -33,5 +33,5 @@ export interface Comment {id:string;userId:string;userName:string;text:string;pr
 export interface Summary {text:string;published:boolean;updatedAt:number}
 export interface MeetingSnapshot {meeting:Meeting;role:Role;segments:Segment[];questions:Question[];evidence:Evidence[];researchBriefs?:ResearchBrief[];comments:Comment[];summary:Summary|null;materials:Material[];seq:number}
 export interface Capabilities {deepseek:boolean;asr:boolean;model:string;version:string}
-export type LiveEvent={type:'snapshot';data:MeetingSnapshot;seq:number}|{type:'transcript.partial';data:Segment}|{type:'status';stage:string;message:string;latencyMs?:number}|{type:'error';message:string;command?:string}|{type:'audio.ack';seq:number}|{type:'pong'};
-export type LiveCommand={type:'start'|'pause'|'resume'|'stop'|'demo.start'|'ping'}|{type:'audio';seq:number;capturedAt:number;pcm:string}|{type:'transcript.manual';text:string;speaker?:string}|{type:'gap';message:string};
+export type LiveEvent={type:'snapshot';data:MeetingSnapshot;seq:number}|{type:'transcript.partial';data:Segment}|{type:'status';stage:string;message:string;latencyMs?:number}|{type:'error';message:string;command?:string;requestId?:string}|{type:'asr.ready';requestId:string}|{type:'audio.ack';seq:number}|{type:'pong'};
+export type LiveCommand={type:'start'|'resume';requestId?:string}|{type:'pause'|'stop'|'demo.start'|'ping'}|{type:'audio';seq:number;capturedAt:number;pcm:string}|{type:'transcript.manual';text:string;speaker?:string}|{type:'gap';message:string};

@@ -157,7 +157,7 @@ for(const command of ['pause','stop'] as const)test(`summary waits for ${command
  const started=deferred(),finishing=deferred(),release=deferred();let callbacks!:ASRCallbacks;
  const fake:ProviderAPI={...providers,getCapabilities:()=>({deepseek:true,asr:true,model:'test',version:'test'}),
   summarizeMeeting:async input=>input.segments.map(s=>s.text).join('|'),
-  createASR(cb){callbacks=cb;started.resolve();return {write(){},close(){},async finish(){finishing.resolve();await release.promise;callbacks.onSegment({id:'tail',text:'last sentence',speaker:'speaker',startMs:1000,endMs:2000,receivedAt:Date.now(),final:true,source:'asr'});}};}};
+  createASR(cb){callbacks=cb;cb.onReady?.();started.resolve();return {write(){},close(){},async finish(){finishing.resolve();await release.promise;callbacks.onSegment({id:'tail',text:'last sentence',speaker:'speaker',startMs:1000,endMs:2000,receivedAt:Date.now(),final:true,source:'asr'});}};}};
  const app=await createApp({dbPath:':memory:',dataDir:dir,providers:fake});await app.listen({port:0,host:'127.0.0.1'});
  let ws:WebSocket|undefined;
  t.after(async()=>{release.resolve();ws?.terminate();await app.close();await rm(dir,{recursive:true,force:true});});

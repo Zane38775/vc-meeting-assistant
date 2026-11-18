@@ -258,8 +258,9 @@ test('Tencent flushes queued audio before end and waits for server final, then c
  const port=(wss.address() as {port:number}).port; const packets:(Buffer|string)[]=[]; const errors:Error[]=[];
  wss.on('connection',ws=>{ws.send(JSON.stringify({code:0}));ws.on('message',(data,binary)=>{packets.push(binary?Buffer.from(data as Buffer):data.toString()); if(!binary){ws.send(JSON.stringify({code:0,sentences:{sentence:'尾音',sentence_id:0,sentence_type:1,speaker_id:0,start_time:0,end_time:210}}));ws.send(JSON.stringify({code:0,final:1}));ws.close();}});});
  const segments:any[]=[];
- const asr=createTencentASR({onSegment:s=>segments.push(s),onStatus:()=>{},onError:e=>errors.push(e)},{appId:'123',secretId:'a',secretKey:'b',engine:'16k_zh_en_speaker_2.0'},{socketFactory:()=>new WebSocket(`ws://127.0.0.1:${port}`)});
- try{asr.write(Buffer.alloc(6400,1));asr.write(Buffer.alloc(320,2));await asr.finish();assert.equal(packets.length,3);assert.equal((packets[1] as Buffer).length,320);assert.equal(packets[2],'{"type":"end"}');assert.equal(segments[0].text,'尾音');assert.deepEqual(errors,[]);}finally{asr.close();for(const c of wss.clients)c.terminate();await new Promise<void>(r=>wss.close(()=>r()));}
+ let readyCount=0;
+ const asr=createTencentASR({onSegment:s=>segments.push(s),onReady:()=>readyCount++,onStatus:()=>{},onError:e=>errors.push(e)},{appId:'123',secretId:'a',secretKey:'b',engine:'16k_zh_en_speaker_2.0'},{socketFactory:()=>new WebSocket(`ws://127.0.0.1:${port}`)});
+ try{asr.write(Buffer.alloc(6400,1));asr.write(Buffer.alloc(320,2));await asr.finish();assert.equal(readyCount,1);assert.equal(packets.length,3);assert.equal((packets[1] as Buffer).length,320);assert.equal(packets[2],'{"type":"end"}');assert.equal(segments[0].text,'尾音');assert.deepEqual(errors,[]);}finally{asr.close();for(const c of wss.clients)c.terminate();await new Promise<void>(r=>wss.close(()=>r()));}
 });
 test('material parser preserves text pages, rejects unsupported and oversized files',async()=>{
  const doc=await parseMaterial(Buffer.from('第一页\f第二页'),'note.md');assert.deepEqual(doc.pages.map(p=>p.text),['第一页','第二页']);
@@ -445,7 +446,7 @@ test('BP analysis retries malformed provider JSON once and leaves HTTP errors al
 test('Tencent reports queue overflow once and rejects finish after overflow',async()=>{
  const wss=new WebSocketServer({port:0});await new Promise<void>(r=>wss.once('listening',r));const port=(wss.address() as {port:number}).port;const errors:Error[]=[];
  const asr=createTencentASR({onSegment:()=>{},onStatus:()=>{},onError:e=>errors.push(e)},{appId:'123',secretId:'a',secretKey:'b',engine:'16k_zh_en_speaker_2.0'},{socketFactory:()=>new WebSocket(`ws://127.0.0.1:${port}`)});
- try{for(let i=0;i<6;i++)asr.write(Buffer.alloc(32000));assert.equal(errors.length,1);await assert.rejects(asr.finish(),/积压/);}finally{asr.close();for(const c of wss.clients)c.terminate();await new Promise<void>(r=>wss.close(()=>r()));}
+ try{for(let i=0;i<5;i++)asr.write(Buffer.alloc(32000));assert.throws(()=>asr.write(Buffer.alloc(32000)),/积压/);assert.equal(errors.length,1);await assert.rejects(asr.finish(),/积压/);}finally{asr.close();for(const c of wss.clients)c.terminate();await new Promise<void>(r=>wss.close(()=>r()));}
 });
 test('Tencent waits for final confirmation with bounded timeout and explicit cancellation',async()=>{
  const wss=new WebSocketServer({port:0});await new Promise<void>(r=>wss.once('listening',r));const port=(wss.address() as {port:number}).port;wss.on('connection',ws=>ws.send(JSON.stringify({code:0})));

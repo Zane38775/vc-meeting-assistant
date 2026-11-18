@@ -4,6 +4,14 @@ import { captureAudio } from './audio';
 import { api } from './api';
 
 type Capture = Awaited<ReturnType<typeof captureAudio>>;
+interface CaptureAttempt {
+  id: string;
+  socket: WebSocket;
+  controller: AbortController;
+  requested: boolean;
+  ready: boolean;
+  timeout?: ReturnType<typeof setTimeout>;
+}
 export function useMeeting(id: string | null, report: (error: string) => void) {
   const [snapshot, setSnapshot] = useState<MeetingSnapshot | null>(null);
   const [partial, setPartial] = useState<Segment | null>(null);
@@ -11,6 +19,7 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
   const [status, setStatus] = useState<{ stage: string; message: string; latencyMs?: number } | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
+  const [warming, setWarming] = useState(false);
   const [levels, setLevels] = useState({ mic: 0, system: 0 });
   const [gap, setGap] = useState(false);
   const [retryEpoch, setRetryEpoch] = useState(0);
@@ -24,15 +33,22 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
   const gapPending = useRef(false);
   const audioSeq = useRef(0);
   const audioPending = useRef(new Map<number, number>());
-  const audioAllowed = useRef(false);
+  const attempt = useRef<CaptureAttempt | null>(null);
   const reportRef = useRef(report);
   reportRef.current = report;
 
   const stopCapture = useCallback(async (flush = false) => {
-    if (!flush) {
-      audioAllowed.current = false;
-      captureStartSeq.current = null;
+    const stoppingAttempt = attempt.current;
+    if (stoppingAttempt) {
+      clearTimeout(stoppingAttempt.timeout);
+      stoppingAttempt.controller.abort();
     }
+    // A live recorder can send its last partial frame until stop confirms it.
+    // A cold or cancelled request must never become ready while it stops.
+    if (!flush || !stoppingAttempt?.ready) attempt.current = null;
+    captureStartSeq.current = null;
+    setCaptureBusy(false);
+    setWarming(false);
     const current = capture.current;
     capture.current = null;
     setCapturing(false);
@@ -41,7 +57,7 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
     if (current) {
       captureStopping.current = current.stop().finally(() => {
         captureStopping.current = null;
-        audioAllowed.current = false;
+        if (attempt.current === stoppingAttempt) attempt.current = null;
       });
     }
     const stopping = captureStopping.current;
@@ -74,7 +90,7 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
       if (data.meeting.id !== id || (latest.current && data.seq < latest.current.seq)) return;
       latest.current = data; setSnapshot(data);
       setPartial(previous => previous && !data.segments.some(s => s.id === previous.id || s.endMs >= previous.endMs && s.speaker === previous.speaker) ? previous : null);
-      if (data.meeting.status === 'ended' || (data.meeting.status === 'paused' && captureStartSeq.current === null)) {
+      if (data.meeting.status === 'ended' || (data.meeting.status === 'paused' && captureStartSeq.current === null && attempt.current?.requested)) {
         void stopCapture();
       }
     };
@@ -99,7 +115,7 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
         }, 20000);
       };
       ws.onmessage = event => {
-        if (disposed) return;
+        if (disposed || socket.current !== ws) return;
         let message: LiveEvent;
         try { message = JSON.parse(event.data); } catch { return; }
         if (message.type === 'snapshot') {
@@ -112,10 +128,20 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
         }
         else if (message.type === 'transcript.partial') setPartial(message.data);
         else if (message.type === 'status') setStatus(message);
+        else if (message.type === 'asr.ready') {
+          const current = attempt.current;
+          if (!current || current.socket !== ws || current.id !== message.requestId || !current.requested || current.ready || !capture.current) return;
+          clearTimeout(current.timeout);
+          capture.current.resume();
+          if (attempt.current !== current) return; // resume can report a disconnected device
+          current.ready = true;
+          setWarming(false); setCapturing(true); setGap(false);
+        }
         else if (message.type === 'audio.ack') {
           if (audioPending.current.delete(message.seq)) captureStartSeq.current = null;
         }
         else if (message.type === 'error') {
+          if (message.requestId && message.requestId !== attempt.current?.id) return;
           reportRef.current(message.message);
           if (capture.current && message.command === 'audio') {
             setGap(true); void stopCapture();
@@ -131,7 +157,8 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
       ws.onclose = event => {
         if (heartbeat) clearInterval(heartbeat);
         if (disposed) return;
-        if (capture.current) { gapPending.current = true; setGap(true); reportRef.current('连接中断，录音已停止。恢复连接后请重新开启采集；中断的音频不会补写。'); }
+        if (attempt.current?.ready) { gapPending.current = true; setGap(true); reportRef.current('连接中断，录音已停止。恢复连接后请重新开启采集；中断的音频不会补写。'); }
+        else if (attempt.current) reportRef.current('连接中断，本次采集尚未开始。请在重连后重新开始。');
         void stopCapture(); setConnection('disconnected');
         if (event.code === 4003 || event.code === 1008) {
           latest.current = null; setSnapshot(null);
@@ -157,26 +184,33 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
   const begin = useCallback(async () => {
     if (localControl.current || captureStopping.current) throw new Error('音频采集操作仍在进行，请稍后再试。');
     const data = latest.current;
-    if (!data || capture.current) return;
+    if (!data || attempt.current || capture.current) return;
     if (data.meeting.demo) { send({ type: data.meeting.status === 'paused' ? 'resume' : 'demo.start' }); return; }
-    if (socket.current?.readyState !== WebSocket.OPEN) throw new Error('请先等待实时连接就绪。');
-    localControl.current = true;
+    const ws = socket.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('请先等待实时连接就绪。');
+    const current: CaptureAttempt = {id:crypto.randomUUID(), socket:ws, controller:new AbortController(), requested:false, ready:false};
+    attempt.current = current;
     setCaptureBusy(true);
     const token = generation.current;
-    let failed = false;
-    let accepting = false;
+    const isCurrent = () => token === generation.current && attempt.current === current && socket.current === ws;
     const fail = (message: string) => {
-      if (token !== generation.current || failed) return;
-      failed = true; setGap(true); reportRef.current(message);
+      if (!isCurrent()) return;
+      reportRef.current(message);
+      if (current.ready) setGap(true);
       void stopCapture();
-      try { send({ type: 'pause' }); send({ type: 'gap', message }); } catch { gapPending.current = true; }
+      if (!current.requested) return;
+      try {
+        send({type:'pause'});
+        if (current.ready) send({type:'gap', message});
+      } catch { if (current.ready) gapPending.current = true; }
     };
     try {
       const recorder = await captureAudio({
         mode: data.meeting.mode,
+        startPaused: true,
+        signal: current.controller.signal,
         onChunk: chunk => {
-          const ws = socket.current;
-          if (failed || !accepting || !audioAllowed.current || token !== generation.current) return;
+          if (!isCurrent() || !current.ready) return;
           const oldest = audioPending.current.values().next().value as number | undefined;
           if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 256 * 1024 || audioPending.current.size >= 40 || oldest !== undefined && Date.now() - oldest > 10000) {
             throw new Error('音频传输未及时确认。这段音频可能不完整，请检查网络后继续。');
@@ -185,38 +219,45 @@ export function useMeeting(id: string | null, report: (error: string) => void) {
           audioPending.current.set(seq, Date.now());
           ws.send(JSON.stringify({ type: 'audio', seq, capturedAt: chunk.capturedAt, pcm: chunk.pcm }));
         },
-        onLevels: value => { if (token === generation.current) setLevels(value); },
+        onLevels: value => { if (isCurrent() && current.ready) setLevels(value); },
         onError: error => fail(typeof error === 'string' ? error : error instanceof Error ? error.message : '音频采集中断，请重新选择音频来源。'),
       });
-      if (token !== generation.current || failed) { await recorder.stop().catch(() => undefined); return; }
+      if (!isCurrent()) { await recorder.stop().catch(() => undefined); return; }
       capture.current = recorder;
       // Other edits can publish a paused snapshot before this request reaches the service.
       captureStartSeq.current = latest.current?.seq ?? data.seq;
-      send({ type: data.meeting.status === 'ready' ? 'start' : 'resume' });
-      accepting = true;
-      audioAllowed.current = true;
-      setCapturing(true); setGap(false);
-    } catch (error) { await stopCapture(); throw error; }
-    finally { localControl.current = false; setCaptureBusy(false); }
+      current.requested = true;
+      setCaptureBusy(false); setWarming(true);
+      current.timeout = setTimeout(() => fail('语音模型启动超时，本次采集已取消。请重新开始。'), 75000);
+      send({ type: data.meeting.status === 'ready' ? 'start' : 'resume', requestId:current.id });
+    } catch (error) {
+      if (!isCurrent()) return;
+      await stopCapture();
+      throw error;
+    }
   }, [send, stopCapture]);
 
   const control = useCallback(async (type: 'pause' | 'stop') => {
     if (localControl.current) throw new Error('正在完成最后一段音频或选择音频来源，请稍后再试。');
     localControl.current = true;
+    const controllingSocket = socket.current;
     try {
+      const deviceSelectionOnly = attempt.current && !attempt.current.requested;
       try {
         await stopCapture(true);
       } catch (error) {
+        if (controllingSocket !== socket.current) return;
         setGap(true);
         const detail = error instanceof Error ? error.message : String(error);
         send({ type: 'gap', message: `最后一段音频未能确认，请核对转写结尾。${detail}` });
       }
-      send({ type });
+      if (controllingSocket !== socket.current) return;
+      if (!(type === 'pause' && deviceSelectionOnly)) send({ type });
       setPartial(null);
     } finally {
       localControl.current = false;
     }
   }, [send, stopCapture]);
 
-  return { snapshot, partial, connection, status, capturing, captureBusy, levels, gap, begin, control, send, refresh, reconnect: () => setRetryEpoch(value => value + 1) };
+  return { snapshot, partial, connection, status, capturing, captureBusy, warming, levels, gap, begin, control, send, refresh, reconnect: () => setRetryEpoch(value => value + 1) };
 }
