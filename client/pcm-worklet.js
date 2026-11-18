@@ -1,9 +1,9 @@
 import {StreamingPcmEncoder, mixAndMeasure} from './audio-core.ts';
 
 class MeetingAudioProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
-    this.paused = false;
+    this.paused = options?.processorOptions?.startPaused === true;
     this.stopped = false;
     this.inFlight = 0;
     this.meterFrames = 0;

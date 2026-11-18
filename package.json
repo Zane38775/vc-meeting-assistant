@@ -1,6 +1,6 @@
 {
   "name": "vc-meeting-assistant",
-  "version": "0.1.0",
+  "version": "0.1.2-beta.5",
   "private": true,
   "type": "module",
   "description": "实时 VC 会议助手",
@@ -75,9 +75,18 @@
         "filter": [
           "*.onnx",
           "tokens.txt",
+          "bpe.vocab",
           "*.json",
           "*.md",
-          "LICENSE*"
+          "LICENSE*",
+          "NOTICE*",
+          "xasr-480/*.onnx",
+          "xasr-480/tokens.txt",
+          "xasr-480/bpe.vocab",
+          "xasr-480/*.json",
+          "xasr-480/*.md",
+          "xasr-480/LICENSE*",
+          "xasr-480/NOTICE*"
         ]
       }
     ],

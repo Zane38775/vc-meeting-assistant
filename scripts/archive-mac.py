@@ -29,13 +29,22 @@ for binary in [app / 'Contents' / 'MacOS' / info['CFBundleExecutable'], resource
     assert magic == 0xfeedfacf and cpu == 0x100000c, f'Not arm64: {binary}'
 assert (resources / 'app.asar.unpacked/dist/server/local-worker.cjs').is_file()
 model = resources / 'models/local-asr'
-provenance = json.loads((model / 'MODEL-PROVENANCE.json').read_text(encoding='utf-8'))
-for entry in provenance['files']:
-    if entry['name'].startswith('test_wavs/'):
-        continue
-    b = (model / entry['name']).read_bytes()
-    assert len(b) == entry['bytes'] and hashlib.sha256(b).hexdigest() == entry['sha256']
-assert not (model / 'test_wavs').exists()
+for profile_dir in [model, model / 'xasr-480']:
+    provenance = json.loads((profile_dir / 'MODEL-PROVENANCE.json').read_text(encoding='utf-8'))
+    if profile_dir != model:
+        assert provenance['profile'] == 'xasr-480'
+        assert provenance['sha256'] == 'fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74'
+    for entry in [*provenance['files'], provenance['vocabulary']]:
+        if entry['name'].startswith('test_wavs/'):
+            continue
+        file = profile_dir / entry['name']
+        assert file.stat().st_size == entry['bytes'], f'Size mismatch: {file}'
+        digest = hashlib.sha256()
+        with file.open('rb') as model_file:
+            while chunk := model_file.read(1024 * 1024):
+                digest.update(chunk)
+        assert digest.hexdigest() == entry['sha256'], f'SHA256 mismatch: {file}'
+    assert not (profile_dir / 'test_wavs').exists()
 assert (root / 'docs' / 'START-MAC.md').is_file(), 'Missing repository installation guide'
 assert (root / 'VALIDATION.md').is_file(), 'Missing validation report'
 

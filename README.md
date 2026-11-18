@@ -6,7 +6,7 @@
 
 **[下载 Mac 测试版 v0.1.0](https://github.com/Zane38775/vc-meeting-assistant/releases/tag/v0.1.0)** · [安装说明](docs/START-MAC.md) · [Mac 开发与验收](docs/MAC-DEVELOPMENT.md) · [验证记录](VALIDATION.md)
 
-普通使用者请下载 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本；GitHub 自动生成的 `Source code (zip)` 仅为源码，不是安装包。当前为预发布测试版，未做 Apple Developer ID 签名或公证。
+公开下载为 Release 附件 `VC-Meeting-Assistant-0.1.0-mac-arm64.zip`，内含应用、模型和安装脚本。GitHub 的 `Source code (zip)` 用于源码开发。当前源码版本为 `0.1.2-beta.5`，是尚未发布的本地候选版。两版均为测试构建，尚未做 Apple Developer ID 签名或公证。
 
 ![会议工作台演示截图](docs/assets/meeting-demo.png)
 
@@ -14,33 +14,49 @@
 
 ## 给使用者
 
-1. 解压 Mac ZIP。按包中的《开始使用》执行 `Install-on-Mac.command`，它安装到当前用户的 Applications 并创建本机签名。没有 Developer ID 签名/公证，不要把本包当作已通过 Mac 实机验收的正式发行版。
-2. 打开 VC Meeting Assistant，创建本机账号。在「服务设置」输入 DeepSeek 密钥。只有该服务首个注册账号可修改配置；密钥不会回显。
-3. 新建项目，上传 PDF/PPTX/TXT/MD，核对提取页码和摘要。先配置密钥再上传才能自动生成摘要。
+1. 解压 Mac ZIP。按包中的《开始使用》执行 `Install-on-Mac.command`，它安装到当前用户的 Applications 并创建本机临时签名。v0.1.0 在一台 Mac 上遇到 Finder 扩展属性导致的签名失败，使用修订脚本完成了安装。修订已纳入本地候选版。
+2. 打开 VC Meeting Assistant，创建本机账号。在「服务设置」输入 DeepSeek 密钥。只有该服务首个注册账号可修改配置。密钥不会回显。
+3. 新建项目，上传 PDF、PPTX、TXT 或 MD，核对提取页码和摘要。配置密钥后，上传会尝试自动生成摘要、术语和项目级会前研判。
 4. 创建真实会议，选择线下或线上；点击「开始采集」后才请求音频权限。线上模式需要麦克风与系统音频权限，并可能请求屏幕捕获权限以选择音源。不保存屏幕画面。
-5. 暂定字幕会持续修订；句子确定后才触发 AI 追问。追问和搜索互相独立，不阻塞字幕。暂停/结束会等待尾句处理；失败时显示缺口。
+5. 暂定字幕会持续修订，AI 追问依据已定稿发言。追问和资料搜集与字幕并行。暂停或结束会等待尾句处理，缺失时显示缺口。
 6. 会后生成纪要，检查并发布或导出 Markdown。演示会议始终标记为演示，不会开启麦克风或调用真实分析服务。
 
 默认不保存原始录音；转写、材料、笔记和配置存放在本机用户应用数据目录。后台默认只监听 127.0.0.1，单机包的邀请链接不能直接供异地伙伴访问。异地使用需部署共享服务；目前可直接导出纪要分享。
 
+## 本地候选版改动
+
+- 原生语音引擎在独立子进程运行，初始化取消或引擎崩溃不再与会议服务共享进程。开始/恢复时等待本次模型就绪后才发送音频；授权和加载阶段可取消。该路径已通过故障回归，beta.3 一轮真人短读稿启动未再闪退；长会仍需验证。
+
+- 默认改用本地 X-ASR 480 ms 流式模型，保留 Zipformer Small 显式回退。短样例英文有所改善，但 `ACE-Step` 等专名仍有误识，新模型真人效果尚未验收。[模型对比](docs/ASR-MODEL-EVALUATION-2026-11-17.md)
+- 会前研判按项目汇总公司、产品、客户、技术路线、商业模式、关键指标和融资需求，分别展示资料页引文、AI 假设、证据缺口及最多五个优先追问。研判参与会中分析，资料修改后需重新生成；资料或研判在生成问题期间改变时，旧草案不会发布。
+
+- 材料上限提高到 100 MiB，保留页数和 PPTX 解压限制。修复 Mac 打包服务中的 PDF 解析、保存长页文字和追问跳转到错误材料的问题。
+- 配置 DeepSeek 后，上传 BP 会同时尝试提取带页码和逐字引文的英文术语。旧材料可点击「提取术语」，也可在「服务设置」手工补充。术语仅作为同项目下次开始或恢复采集时的本地解码提示。
+- 会中积累 80 个新增有效字符再安排分析，两轮分析至少相隔 30 秒。每轮最多展示一个有新增发言依据的追问，允许零问。短会在暂停或结束后可以触发首次分析；已有分析后，暂停/结束不再绕过字数和间隔门槛。所有尾句仍保存并进入纪要上下文。
+- 分析补入较早发言原文与已答/已忽略问题，帮助识别已回答事项和前后矛盾。历史有长度预算，省略范围明确，仍要求本轮新增发言触发追问。
+- 公开检索保留来源、时间和原文摘要，并仅依据搜索摘要生成有逐字引文的中文要点、相关性和待核实事项。后续追问可参考同一场会议已整理的资料。中文整理失败后，后续相同查询可在冷却后复用缓存来源重试。
+
 ## 已验证与未验证
 
-- 自动测试覆盖权限隔离、撤权断连、私人笔记、密钥保护、尾音刷新、并发控制、删除竞态、资料解析与本地模型真实推理。
-- Windows 开发机上的两段 WAV 按 200ms 节奏测试，首条增量约 1.2–1.4 秒；自然分句需等待约 1.2 秒静音。完整浏览器采集链路以公开 WAV 模拟麦克风，首条字幕约 1.3 秒。均不是 Mac 实测或识别准确率指标。
-- 桌面应用启动、沙盒、配置状态和受保护原文件下载已实际验证。
-- 尚未验证：朋友 Mac 上的安装/本机签名、麦克风/系统声音、真实会议、60 分钟稳定性、DeepSeek 真实密钥调用、异地双设备协作。详见 VALIDATION.md 和 docs/LOCAL-ASR-VALIDATION.md。
+- beta.5 补入历史上下文并修复中文资料整理失败后的重试。真实 DeepSeek 三次虚构文本工程检查分别得到：已答议题零问、新证据矛盾一问、会务尾句零问。该结果不代表真人追问深度或长会通过。[本轮记录](docs/COACHING-CONTEXT-VALIDATION-2026-11-18.md)
+
+- **最新真人结果**：beta.3 用 Mac 内置麦克风完成 20.8 秒读稿，无闪退，暂停后尾句保存。`home party` 正确，`ACE-Step` 及完整英文句仍误识；暂停后还出现了多余且引用不相关的追问。beta.4 收紧暂停/结束后的追问节奏，本机 130 项测试通过、零跳过。英文、专业追问质量、直接结束尾句及长会仍待验收。[验证记录](docs/ASR-STARTUP-INCIDENT-2026-11-18.md)
+
+- v0.1.0 在 Apple Silicon Mac 上完成修订脚本安装、本机签名、启动、真人线下收音和真实 DeepSeek 追问与检索。测试暴露了英文错词、重复浅显的追问、PDF 解析错误和大 PPTX 上传上限。
+- Mac 上的阶段性自动测试和生产构建已通过。真实 Electron 服务中合成 PDF 已解析并通过原件字节比对。源码界面重新上传原约 35.2 MB PPTX 后成功解析 50 页，摘要曾因 DeepSeek 返回条数超过本地限制而未显示。修订后实际接口已生成摘要和有原文依据的术语，0.1.1 候选界面已提取摘要和术语，但真人复验仍把 `home party` 识别成「红 PARTY」，将 `ACE-Step` 识别成「A STEP」，并有一句尾句缺失、原因未确认。
+- 待验证项目包括X-ASR 新候选版的真人中英文识别、追问深度、中文资料质量、腾讯会议双向收音、60 分钟稳定性和异地双设备协作。[本地 ASR 验证](docs/LOCAL-ASR-VALIDATION.md) · [验证记录](VALIDATION.md) · [Mac 设备记录](docs/MAC-DEVICE-VALIDATION-2026-11-16.md)
 
 当前限制：本地模型不自动区分说话人，支持人工修改角色；扫描页和图表不做 OCR，显示解析警告并允许补录；公开检索使用保守技术关键词表，超出词表的查询不发送；没有 AI 投资评级功能。
 
 ## 源码运行
 
-要求 Node.js 24、npm；Windows/macOS。模型下载的源归档约 437 MiB，但实际运行模型约 57.36 MiB；下载脚本校验固定 SHA256。
+要求 Node.js 24、npm；Windows/macOS。模型下载的两个源归档合计约 565 MiB，运行模型合计约 219 MiB（X-ASR 约 161 MiB，加旧模型约 57 MiB）；下载脚本校验固定 SHA256。
 
 ```text
 git clone https://github.com/Zane38775/vc-meeting-assistant.git
 cd vc-meeting-assistant
 npm ci
-node scripts/download-model.mjs
+npm run model:download
 npm run build
 npm run desktop
 ```
@@ -54,7 +70,7 @@ npm run package:mac
 python3 scripts/archive-mac.py
 ```
 
-`package:mac` 使用 Electron 官方 Packager，包含 Apple arm64 语音/PDF 运行库及模型。跨平台构建可生成 .app 目录；可信开发者签名、公证与系统音频验收需在 Mac 完成。本机签名脚本不会关闭 Gatekeeper 或移除隔离属性。
+`package:mac` 使用 Electron 官方 Packager，包含 Apple arm64 语音/PDF 运行库及模型。跨平台构建可生成 .app 目录。可选的 `ELECTRON_ZIP_DIR` 可指向相同版本的官方 Electron ZIP 缓存，打包前会验证 SHA-256。可信开发者签名、公证与系统音频验收需在 Mac 完成。本机签名脚本保留 Gatekeeper 和隔离属性。
 
 归档脚本将可分发 ZIP 和 SHA-256 校验文件写入 `release/`。在 Windows 上使用 `python` 代替 `python3`。详细的更新源码、数据位置、故障排查和 Mac 验收清单见 [Mac 开发指南](docs/MAC-DEVELOPMENT.md)。GitHub Actions 会在 Windows 与 Apple 芯片 macOS runner 上执行测试和构建；Mac 构建附件供开发验证，不等于真实会议收音验收。
 
@@ -68,4 +84,4 @@ python3 scripts/archive-mac.py
 
 ## 技术与模型
 
-Electron、React/TypeScript、Fastify、SQLite、AudioWorklet、WebSocket。ASR 采用 sherpa-onnx 的流式 Zipformer small（中文/英文），独立 Worker，CPU 两线程。推理/资料分析/检索使用 DeepSeek 独立接口。模型与运行库授权、来源、校验值在随包的模型资源中。
+Electron、React/TypeScript、Fastify、SQLite、AudioWorklet、WebSocket。ASR 默认采用 sherpa-onnx 的 X-ASR 480 ms（中文/英文），保留 Zipformer Small，独立子进程、CPU 两线程。推理/资料分析/检索使用 DeepSeek 独立接口。模型与运行库授权、来源、校验值在随包的模型资源中。

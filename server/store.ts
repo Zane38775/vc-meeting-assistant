@@ -1,6 +1,6 @@
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID,randomBytes,createHash,scryptSync,timingSafeEqual} from 'node:crypto';
-import type {User,Role,Meeting,MeetingSnapshot,Segment,Comment,Summary,Material,Question,Evidence} from '../shared/types';
+import type {User,Role,Meeting,MeetingSnapshot,Segment,Comment,Summary,Material,Question,Evidence,ResearchBrief} from '../shared/types';
 export const id=()=>randomUUID();
 export const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 export function failure(message:string,statusCode=400):never {throw Object.assign(new Error(message),{statusCode})}
@@ -28,7 +28,27 @@ export class Store {
  role(pid:string,uid:string):Role|undefined{return this.get<{role:Role}>('member',`${pid}:${uid}`)?.role;}
  requireRole(pid:string,uid:string,edit=false){const role=this.role(pid,uid);if(!role||edit&&role==='viewer')failure('没有访问权限',403);return role;}
  meeting(mid:string,uid:string,edit=false){const m=this.get<Meeting>('meeting',mid);if(!m)failure('会议不存在',404);this.requireRole(m.projectId,uid,edit);return m;}
- snapshot(mid:string,uid:string):MeetingSnapshot {const meeting=this.meeting(mid,uid);const role=this.requireRole(meeting.projectId,uid);const summary=this.get<Summary>('summary',mid);return {meeting,role,segments:this.list<Segment>('segment',mid).sort((a,b)=>a.startMs-b.startMs),questions:this.list<Question>('question',mid),evidence:this.list<Evidence>('evidence',mid),comments:this.list<Comment>('comment',mid).filter(c=>!c.private||c.userId===uid),summary:summary&&(summary.published||role!=='viewer')?summary:null,materials:this.list<Material>('material',meeting.projectId),seq:this.seq(mid)};}
+ snapshot(mid:string,uid:string):MeetingSnapshot {const meeting=this.meeting(mid,uid);const role=this.requireRole(meeting.projectId,uid);const summary=this.get<Summary>('summary',mid);return {meeting,role,segments:this.list<Segment>('segment',mid).sort((a,b)=>a.startMs-b.startMs),questions:this.list<Question>('question',mid),evidence:this.list<Evidence>('evidence',mid),researchBriefs:this.list<ResearchBrief>('researchBrief',mid),comments:this.list<Comment>('comment',mid).filter(c=>!c.private||c.userId===uid),summary:summary&&(summary.published||role!=='viewer')?summary:null,materials:this.list<Material>('material',meeting.projectId),seq:this.seq(mid)};}
  finalSegment(mid:string,segment:Segment){const key=`${mid}:${segment.id}`;const old=this.get<Segment>('segment',key);if(old&&old.text===segment.text&&old.speaker===segment.speaker)return false;this.put('segment',key,mid,{...segment,final:true});return true;}
+ recoverInterruptedMeetings(){
+  this.db.exec('BEGIN IMMEDIATE');
+  try{
+   for(const meeting of this.list<Meeting>('meeting')){
+    if(meeting.status!=='live'&&!(meeting.status==='paused'&&meeting.finishingCapture))continue;
+    meeting.status='paused';
+    delete meeting.finishingCapture;
+    this.put('meeting',meeting.id,meeting.projectId,meeting);
+    if(!meeting.demo){
+     const offset=this.list<Segment>('segment',meeting.id).reduce((end,s)=>Math.max(end,s.endMs),0);
+     this.finalSegment(meeting.id,{id:id(),text:'服务重启前收音被中断，最后一段语音可能缺失。请核对结尾后恢复采集。',speaker:'系统',startMs:offset,endMs:offset,receivedAt:Date.now(),final:true,source:'manual',gap:true});
+    }
+    this.next(meeting.id);
+   }
+   this.db.exec('COMMIT');
+  }catch(error){
+   this.db.exec('ROLLBACK');
+   throw error;
+  }
+ }
  close(){this.db.close();}
 }

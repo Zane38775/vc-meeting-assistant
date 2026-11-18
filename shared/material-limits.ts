@@ -1,0 +1,3 @@
+export const MAX_MATERIAL_FILE_MIB = 100;
+export const MAX_MATERIAL_FILE_BYTES = MAX_MATERIAL_FILE_MIB * 1024 * 1024;
+export const MATERIAL_FILE_LIMIT_MESSAGE = `材料文件不能超过 ${MAX_MATERIAL_FILE_MIB} MiB，请压缩或拆分后重试。`;
