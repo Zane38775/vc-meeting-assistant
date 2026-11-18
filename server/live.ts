@@ -8,7 +8,7 @@ import {currentPreparation} from './project-preparation';
 import type {ProviderAPI,ASRSession,AnalysisInput,QuestionDraft} from './providers/contracts';
 type Peer={socket:WebSocket;user:User;mid:string};
 type ResearchAttempt={questionIds:Set<string>;active:boolean;retryAt:number};
-type Runtime={asr?:ASRSession;startup?:AbortController;timer?:ReturnType<typeof setTimeout>;demoTimer?:ReturnType<typeof setInterval>;busy:boolean;pendingSegments:Map<string,number>;flushAnalysis?:boolean;calls:number;lastAnalysis?:number;controllers:Set<AbortController>;demoIndex:number;recordingPeer?:WebSocket;lastAudioSeq:number;audioRejected?:boolean;researchAttempts:Map<string,ResearchAttempt>;generation:number;transition?:Promise<void>};
+type Runtime={asr?:ASRSession;startup?:AbortController;timer?:ReturnType<typeof setTimeout>;demoTimer?:ReturnType<typeof setInterval>;busy:boolean;pendingSegments:Map<string,number>;calls:number;lastAnalysis?:number;controllers:Set<AbortController>;demoIndex:number;recordingPeer?:WebSocket;lastAudioSeq:number;audioRejected?:boolean;researchAttempts:Map<string,ResearchAttempt>;generation:number;transition?:Promise<void>};
 const ASR_START_TIMEOUT_MS=24_000;
 const validRequestId=(value:unknown):value is string=>typeof value==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(value);
 const MIN_ANALYSIS_INTERVAL_MS=30_000;
@@ -247,29 +247,24 @@ export class LiveHub {
   const m=this.store.get<Meeting>('meeting',mid)!;
   return {projectName:this.store.get<any>('project',m.projectId)?.name||'',segments:this.store.list<Segment>('segment',mid).filter(s=>!s.gap),questions:this.store.list<Question>('question',mid),researchBriefs:this.store.list<ResearchBrief>('researchBrief',mid),evidence:this.store.list<Evidence>('evidence',mid),...this.projectAnalysisContext(m.projectId)};
  }
- private schedule(mid:string,r:Runtime,flush=false){
-  if(!r.pendingSegments.size){r.flushAnalysis=false;return;}
-  if(flush){
-   r.flushAnalysis=true;
-   clearTimeout(r.timer);
-   r.timer=undefined;
-  }
-  if(r.busy||r.timer||r.transition)return;
-  if(!r.flushAnalysis&&!hasEnoughFreshText(r))return;
+ private schedule(mid:string,r:Runtime,allowFirstTail=false){
+  if(!r.pendingSegments.size||r.busy||r.timer||r.transition)return;
+  // A short meeting can get its first analysis on pause or stop. Subsequent rounds use the normal cadence.
+  const firstTail=allowFirstTail&&r.lastAnalysis===undefined;
+  if(!firstTail&&!hasEnoughFreshText(r))return;
   const configured=Number(process.env.AI_MIN_INTERVAL_MS);
   const interval=Number.isFinite(configured)?Math.max(MIN_ANALYSIS_INTERVAL_MS,configured):MIN_ANALYSIS_INTERVAL_MS;
-  const delay=r.flushAnalysis||r.lastAnalysis===undefined?0:Math.max(0,interval-(Date.now()-r.lastAnalysis));
+  const delay=r.lastAnalysis===undefined?0:Math.max(0,interval-(Date.now()-r.lastAnalysis));
   r.timer=setTimeout(()=>{
    r.timer=undefined;
-   void this.analyze(mid,r);
+   void this.analyze(mid,r,firstTail);
   },delay);
  }
- private async analyze(mid:string,r:Runtime){
+ private async analyze(mid:string,r:Runtime,firstTail:boolean){
   if(!this.alive(mid,r)||r.busy||r.transition||!r.pendingSegments.size)return;
-  if(!r.flushAnalysis&&!hasEnoughFreshText(r))return;
+  if(!firstTail&&!hasEnoughFreshText(r))return;
   const newSegmentIds=[...r.pendingSegments.keys()];
   r.pendingSegments.clear();
-  r.flushAnalysis=false;
   if(!this.providers.getCapabilities().deepseek)return;
   if(r.calls>=Number(process.env.AI_MAX_CALLS_PER_MEETING||150)){
    this.status(mid,'coach','已达到本场 AI 调用上限，字幕继续运行');

@@ -586,18 +586,60 @@ for(const action of ['pause','stop'] as const) test(`analysis on ${action} inclu
   session.callbacks.onSegment({...segment('first'),text:'经营信息'.repeat(24)});
   t.mock.timers.tick(0);
   assert.equal(calls.length,1);
-  session.finish=async()=>{session.callbacks.onSegment({...segment('tail'),text:'刚才说的是客户试点'});};
+  session.finish=async()=>{session.callbacks.onSegment({...segment('tail'),text:'试点新增了明确的复购约定与交付审查要求'.repeat(5)});};
   await f.command(action);
   assert.equal(calls.length,1);
   assert.equal(f.store.snapshot('meeting','user').meeting.status,action==='pause'?'paused':'ended');
   releaseAI();
   await settleMessages();
-  t.mock.timers.tick(0);
+  t.mock.timers.tick(29_999);
+  assert.equal(calls.length,1);
+  t.mock.timers.tick(1);
   await settleMessages();
   assert.deepEqual(calls.map(input=>input.newSegmentIds),[['first'],['tail']]);
   await f.command('stop');
   t.mock.timers.tick(30_000);
   assert.equal(calls.length,2);
+});
+
+for(const firstRoundBusy of [false,true])test(`pausing a 20.8-second meeting preserves a short closing remark without re-coaching (${firstRoundBusy?'busy':'idle'} first round)`,async t=>{
+  const f=fixture(t);
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:60_000});
+  f.providers.getCapabilities=()=>({asr:true,deepseek:true,model:'test',version:'test'});
+  const calls:AnalysisInput[]=[];
+  const pilot='已经向物业公司部署巡检系统，但缺少现场对比数据';
+  const closing='好，这次录音就到这里。';
+  const first={text:'试点中如何复测巡检效果和单次成本？',reason:'需验证试点结果。',quote:pilot,segmentIds:['pilot'],focus:'technical_moat' as const};
+  let release!:()=>void;
+  const pending=new Promise<void>(resolve=>{release=resolve;});
+  f.providers.analyzeContext=async input=>{
+    calls.push(input);
+    if(calls.length===1){
+      if(firstRoundBusy)await pending;
+      return {questions:[first]};
+    }
+    return {questions:[{text:'这些巡检结果是现场测量还是只讨论过设想？',
+      reason:'确认测试进展。',quote:closing,segmentIds:['closing'],focus:'next_validation'}]};
+  };
+  await f.command('start');
+  t.mock.timers.tick(13_000);
+  const session=f.sessions[0];
+  session.callbacks.onSegment({...segment('pilot'),text:`${pilot}。现有产品在物业日常巡检中使用，客户侧仍在统计重复巡检成本，技术团队可以提供试点时间但还没有现场基线数据。试点范围涉及多个不同站点。`});
+  t.mock.timers.tick(0);
+  await settleMessages();
+  assert.equal(calls.length,1);
+  t.mock.timers.tick(7_800);
+  session.finish=async()=>session.callbacks.onSegment({...segment('closing'),text:closing,startMs:19_800,endMs:20_800});
+  await f.command('pause');
+  release();
+  await settleMessages();
+  t.mock.timers.tick(30_000);
+  await settleMessages();
+  const snapshot=f.store.snapshot('meeting','user');
+  assert.equal(snapshot.meeting.status,'paused');
+  assert.equal(snapshot.segments.find(item=>item.id==='closing')?.text,closing);
+  assert.deepEqual(calls.map(input=>input.newSegmentIds),[['pilot']]);
+  assert.deepEqual(snapshot.questions.map(q=>q.text),[first.text]);
 });
 
 test('coaching keeps one question per round and suppresses reworded questions about the same evidence and focus',async t=>{
